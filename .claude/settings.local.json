@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run:*)",
+      "Bash(powershell:*)",
+      "Bash(cd E:\\\\MY AI\\\\ValQ:*)",
+      "Bash(cd \"E:/MY AI/ValQ\" && node -c src/store/useVDTStore.js 2>&1)",
+      "Bash(cd:*)",
+      "Bash(npm install:*)",
+      "Bash(rm:*)",
+      "Bash(node:*)",
+      "Bash(npx eslint:*)"
+    ]
+  }
+}

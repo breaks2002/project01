@@ -1,0 +1,17 @@
+指标ID,指标名称,节点类型,公式,最小值,最大值,单位,显示格式,指标方向,层级,汇总方式,比率型指标
+yingyeshouru,营业收入,driver,,8300000,30000000,万元,"#,##0",auto,4.1,sum,FALSE
+yingyechengben,营业成本,driver,,4150000,20000000,万元,"#,##0",negative,4.2,sum,FALSE
+shuijinjifujia,税金及附加,driver,,83000,500000,万元,"#,##0",negative,4.3,sum,FALSE
+xiaoshoufeiyong,销售费用,driver,,1310000,5000000,万元,"#,##0",negative,4.4,sum,FALSE
+guanlifeiyong,管理费用,driver,,820000,3000000,万元,"#,##0",negative,4.5,sum,FALSE
+yanfafeiyong,研发费用,driver,,643000,2000000,万元,"#,##0",negative,4.6,sum,FALSE
+caiwufeiyong,财务费用,driver,,235000,800000,万元,"#,##0",negative,4.7,sum,FALSE
+qitashouyi,其他收益,driver,,72000,300000,万元,"#,##0",positive,4.8,sum,FALSE
+touzishouyi,投资收益,driver,,114000,500000,万元,"#,##0",positive,4.9,sum,FALSE
+yingyelirun,营业利润,computed,yingyeshouru - yingyechengben - shuijinjifujia - xiaoshoufeiyong - guanlifeiyong - yanfafeiyong - caiwufeiyong + qitashouyi + touzishouyi,,,,,auto,3,,FALSE
+yingyewaishouru,营业外收入,driver,,108000,400000,万元,"#,##0",positive,3.1,sum,FALSE
+yingyewaizhichu,营业外支出,driver,,44000,200000,万元,"#,##0",negative,3.2,sum,FALSE
+lirunzonge,利润总额,computed,yingyelirun + yingyewaishouru - yingyewaizhichu,,,,,auto,2,,FALSE
+suodeshuifeiyong,所得税费用,computed,lirunzonge * 0.25,,,,,negative,2.1,,FALSE
+jinglirun,净利润,computed,lirunzonge - suodeshuifeiyong,,,,,positive,1,,FALSE
+

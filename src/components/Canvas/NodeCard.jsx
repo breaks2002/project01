@@ -8,6 +8,12 @@ const NodeCard = ({ node, allNodes, onSelect, isSelected, onValueChange, onDelet
   const [isResizing, setIsResizing] = useState(false);
   const [percentInput, setPercentInput] = useState('');
   const [localInputValue, setLocalInputValue] = useState(null);
+
+  // 当节点的值从外部（如AI调参）更新时，重置本地输入值
+  React.useEffect(() => {
+    setLocalInputValue(null);
+  }, [node.value]);
+
   const [isMonthEditMode, setIsMonthEditMode] = useState(false);
   const [monthEdits, setMonthEdits] = useState({});
   const [selectedMonths, setSelectedMonths] = useState([]);
@@ -82,11 +88,18 @@ const NodeCard = ({ node, allNodes, onSelect, isSelected, onValueChange, onDelet
   // ========== 节点值 ==========
   let nodeValue = 0;
   if (isDriver) {
-    // 驱动因素：优先使用 aggregated.actualPlusForecastTotal（按 aggregationType 聚合）
-    if (aggregated.actualPlusForecastTotal !== null && aggregated.actualPlusForecastTotal !== undefined && !isNaN(aggregated.actualPlusForecastTotal)) {
-      nodeValue = aggregated.actualPlusForecastTotal;
-    } else if (node.value !== null && node.value !== undefined && !isNaN(node.value)) {
-      nodeValue = node.value;
+    // 驱动因素：检查 node.value 是否与 timeData 聚合值一致
+    // 如果不一致（如AI调参后），优先使用 node.value
+    const aggregatedValue = aggregated.actualPlusForecastTotal;
+    const storedValue = node.value ?? node.baseline ?? 0;
+
+    // 如果 storedValue 与 aggregatedValue 差距较大（>0.01），说明 value 被手动/AI设置过，优先使用 storedValue
+    if (Math.abs(storedValue - aggregatedValue) > 0.01) {
+      nodeValue = storedValue;
+    } else if (aggregatedValue !== null && aggregatedValue !== undefined && !isNaN(aggregatedValue)) {
+      nodeValue = aggregatedValue;
+    } else {
+      nodeValue = storedValue;
     }
   } else {
     // 计算指标：直接使用 node.value（已经通过公式计算过）

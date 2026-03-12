@@ -31,7 +31,11 @@ const Toolbar = ({
   onRestoreNodeTreeList,
   onOpenStdDevAnalysis,
   showStdDevAnalysis,
-  isStdDevAnalysisMinimized
+  isStdDevAnalysisMinimized,
+  onOpenAIConfig,
+  showAIConfig,
+  onOpenAITuning,
+  showAITuning
 }) => {
   return (
     <div className="h-14 bg-white border-b px-4 flex items-center justify-between shadow-sm">
@@ -108,6 +112,32 @@ const Toolbar = ({
         >
           <span>📐</span>
           <span>标准差分析</span>
+        </button>
+
+        {/* AI配置按钮 */}
+        <button
+          onClick={onOpenAIConfig}
+          className={`shrink-0 px-4 py-2 rounded-lg flex items-center gap-2 font-medium shadow-sm whitespace-nowrap ${
+            showAIConfig
+              ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white hover:from-indigo-700 hover:to-purple-700'
+              : 'bg-gradient-to-r from-indigo-400 to-purple-400 text-white hover:from-indigo-500 hover:to-purple-500'
+          }`}
+        >
+          <span>⚙️</span>
+          <span>AI配置</span>
+        </button>
+
+        {/* AI调参按钮 */}
+        <button
+          onClick={onOpenAITuning}
+          className={`shrink-0 px-4 py-2 rounded-lg flex items-center gap-2 font-medium shadow-sm whitespace-nowrap ${
+            showAITuning
+              ? 'bg-gradient-to-r from-blue-600 to-cyan-600 text-white hover:from-blue-700 hover:to-cyan-700'
+              : 'bg-gradient-to-r from-blue-400 to-cyan-400 text-white hover:from-blue-500 hover:to-cyan-500'
+          }`}
+        >
+          <span>🤖</span>
+          <span>AI调参</span>
         </button>
       </div>
 

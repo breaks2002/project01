@@ -10,6 +10,8 @@ import FormulaEditorPanel from './components/DataPanel/FormulaEditorPanel';
 import ScenarioComparePanel from './components/DataPanel/ScenarioComparePanel';
 import SensitivityAnalysisPanel from './components/DataPanel/SensitivityAnalysisPanel';
 import StdDevAnalysisPanel from './components/DataPanel/StdDevAnalysisPanel';
+import AIConfigPanel from './components/DataPanel/AIConfigPanel';
+import AITuningPanel from './components/DataPanel/AITuningPanel';
 import TrendChart from './components/Canvas/TrendChart';
 import WaterfallChart from './components/Canvas/WaterfallChart';
 import NodeTreeList from './components/NodeTreeList/NodeTreeList';
@@ -69,8 +71,12 @@ function App() {
   const [stdDevAnalysisZIndex, setStdDevAnalysisZIndex] = useState(50);
   const [trendChartZIndex, setTrendChartZIndex] = useState(60);
   const [waterfallChartZIndex, setWaterfallChartZIndex] = useState(60);
+  const [aiConfigZIndex, setAiConfigZIndex] = useState(55);
+  const [aiTuningZIndex, setAiTuningZIndex] = useState(56);
   const [trendChartNodeId, setTrendChartNodeId] = useState(null);
   const [waterfallChartNodeId, setWaterfallChartNodeId] = useState(null);
+  const [showAIConfig, setShowAIConfig] = useState(false);
+  const [showAITuning, setShowAITuning] = useState(false);
   const initializedRef = useRef(false);
   const canvasRef = useRef(null);
   const canvasContainerRef = useRef(null);
@@ -121,9 +127,11 @@ function App() {
       nodeTreeListZIndex,
       stdDevAnalysisZIndex,
       trendChartZIndex,
-      waterfallChartZIndex
+      waterfallChartZIndex,
+      aiConfigZIndex,
+      aiTuningZIndex
     ];
-  }, [dataPanelZIndex, scenarioCompareZIndex, sensitivityAnalysisZIndex, formulaEditorZIndex, nodeEditorZIndex, nodeTreeListZIndex, stdDevAnalysisZIndex, trendChartZIndex, waterfallChartZIndex]);
+  }, [dataPanelZIndex, scenarioCompareZIndex, sensitivityAnalysisZIndex, formulaEditorZIndex, nodeEditorZIndex, nodeTreeListZIndex, stdDevAnalysisZIndex, trendChartZIndex, waterfallChartZIndex, aiConfigZIndex, aiTuningZIndex]);
 
   const bringDataPanelToFront = useCallback(() => {
     const maxZ = Math.max(...getAllZIndexes()) + 1;
@@ -168,6 +176,16 @@ function App() {
   const bringWaterfallChartToFront = useCallback(() => {
     const maxZ = Math.max(...getAllZIndexes()) + 1;
     setWaterfallChartZIndex(maxZ);
+  }, [getAllZIndexes]);
+
+  const bringAIConfigToFront = useCallback(() => {
+    const maxZ = Math.max(...getAllZIndexes()) + 1;
+    setAiConfigZIndex(maxZ);
+  }, [getAllZIndexes]);
+
+  const bringAITuningToFront = useCallback(() => {
+    const maxZ = Math.max(...getAllZIndexes()) + 1;
+    setAiTuningZIndex(maxZ);
   }, [getAllZIndexes]);
 
   // 初始化示例模型（仅当 localStorage 没有数据时）
@@ -698,6 +716,10 @@ function App() {
         }}
         showStdDevAnalysis={showStdDevAnalysis}
         isStdDevAnalysisMinimized={isStdDevAnalysisMinimized}
+        onOpenAIConfig={() => setShowAIConfig(true)}
+        showAIConfig={showAIConfig}
+        onOpenAITuning={() => setShowAITuning(true)}
+        showAITuning={showAITuning}
       />
 
       {/* 缩放控制栏 */}
@@ -969,6 +991,26 @@ function App() {
             allNodes={nodes}
             scenarioName={scenarios[currentScenarioId]?.name}
             onClose={() => setWaterfallChartNodeId(null)}
+          />
+        </div>
+      )}
+
+      {/* AI配置面板 */}
+      {showAIConfig && (
+        <div style={{ zIndex: aiConfigZIndex, position: 'relative' }} onClick={bringAIConfigToFront}>
+          <AIConfigPanel
+            onClose={() => setShowAIConfig(false)}
+            onBringToFront={bringAIConfigToFront}
+          />
+        </div>
+      )}
+
+      {/* AI调参面板 */}
+      {showAITuning && (
+        <div style={{ zIndex: aiTuningZIndex, position: 'relative' }} onClick={bringAITuningToFront}>
+          <AITuningPanel
+            onClose={() => setShowAITuning(false)}
+            onBringToFront={bringAITuningToFront}
           />
         </div>
       )}

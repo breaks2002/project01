@@ -2,11 +2,13 @@ import { create } from 'zustand';
 import { Calculator } from '../engine/Calculator';
 import { FormulaParser } from '../engine/FormulaParser';
 import { aggregateTimeData } from '../utils/formatters';
+import { encryptApiKey, decryptApiKey } from '../services/aiService';
 
 // localStorage key 和数据版本
 const STORAGE_KEY = 'vdt-store-data';
 const DATA_VERSION_KEY = 'vdt-data-version';
 const CURRENT_DATA_VERSION = '3.4'; // 更新数据时修改版本号
+const AI_CONFIG_KEY = 'vdt-ai-config';
 
 /**
  * 计算 MONTHLY 公式的初始值（用原始月度数据）
@@ -829,6 +831,38 @@ const useVDTStore = create((set, get) => {
   // 尝试从 localStorage 加载初始数据
   const storedData = loadFromStorage();
 
+  // 加载AI配置
+  const loadAIConfig = () => {
+    try {
+      const stored = localStorage.getItem(AI_CONFIG_KEY);
+      if (stored) {
+        const config = JSON.parse(stored);
+        return {
+          url: config.url || '',
+          apiKey: config.apiKey ? decryptApiKey(config.apiKey) : '',
+          model: config.model || '',
+          provider: config.provider || 'custom',
+          temperature: config.temperature ?? 0.7,
+          maxTokens: config.maxTokens ?? 2000,
+          systemPrompt: config.systemPrompt || ''
+        };
+      }
+    } catch (e) {
+      console.warn('加载AI配置失败:', e);
+    }
+    return {
+      url: '',
+      apiKey: '',
+      model: '',
+      provider: 'custom',
+      temperature: 0.7,
+      maxTokens: 2000,
+      systemPrompt: ''
+    };
+  };
+
+  const initialAIConfig = loadAIConfig();
+
   // 初始化默认方案
   const defaultScenarioId = 'scenario_default';
   const initialScenarios = storedData?.scenarios || {
@@ -854,6 +888,27 @@ const useVDTStore = create((set, get) => {
     hasLoadedFromStorage: !!storedData,
     scenarios: initialScenarios,
     currentScenarioId: initialScenarioId,
+
+    // AI配置状态
+    aiConfig: initialAIConfig,
+    setAIConfig: (config) => {
+      const newConfig = { ...get().aiConfig, ...config };
+      set({ aiConfig: newConfig });
+      // 保存到localStorage（API Key加密）
+      try {
+        localStorage.setItem(AI_CONFIG_KEY, JSON.stringify({
+          url: newConfig.url,
+          apiKey: newConfig.apiKey ? encryptApiKey(newConfig.apiKey) : '',
+          model: newConfig.model,
+          provider: newConfig.provider,
+          temperature: newConfig.temperature,
+          maxTokens: newConfig.maxTokens,
+          systemPrompt: newConfig.systemPrompt
+        }));
+      } catch (e) {
+        console.warn('保存AI配置失败:', e);
+      }
+    },
 
     // 保存到 localStorage 的辅助函数
     _persist: () => {
@@ -936,7 +991,8 @@ const useVDTStore = create((set, get) => {
       }
 
       // === 步骤 3: 先按 aggregationType 更新所有驱动因子的 value ===
-      // 确保驱动因子的 value 是实际+预测按聚合方式计算出来的
+      // 注意：只有当驱动因子的 value 与 timeData 聚合值一致时（即timeData驱动value），才更新
+      // 如果 value 已被用户或AI手动设置（与聚合值不同），则保留当前 value
       allNodeIds.forEach(id => {
         const node = newNodes[id];
         if (node.type === 'driver' && node.timeData) {
@@ -946,7 +1002,25 @@ const useVDTStore = create((set, get) => {
           }
           // 用 aggregateTimeData 计算实际+预测的聚合值
           const aggregated = aggregateTimeData(node.timeData, aggType);
-          newNodes[id] = { ...node, value: aggregated.actualPlusForecastTotal };
+
+          // 获取原始节点（更新前的状态）
+          const originalNode = state.nodes[id];
+          const originalValue = originalNode?.value;
+          const originalBaseline = originalNode?.baseline ?? originalNode?.initialBaseline;
+
+          // 判断 value 是否被手动修改过：
+          // 1. 如果当前 value 等于 baseline/initialBaseline（默认值），说明未被手动修改，用 timeData 聚合值
+          // 2. 如果当前 value 与 timeData 聚合值差距很小（<0.01），说明是一致的
+          // 3. 否则，说明 value 已被手动设置，保留当前 value
+          const isValueFromTimeData = originalValue === undefined ||
+            Math.abs(originalValue - aggregated.actualPlusForecastTotal) < 0.01 ||
+            (originalBaseline !== undefined && Math.abs(originalValue - originalBaseline) < 0.01);
+
+          if (isValueFromTimeData) {
+            // value 来自 timeData 聚合，正常更新
+            newNodes[id] = { ...node, value: aggregated.actualPlusForecastTotal };
+          }
+          // 否则：保留当前的 value（node.value 已经在 newNodes 中）
         }
       });
 

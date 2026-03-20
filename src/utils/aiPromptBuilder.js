@@ -1,3 +1,6 @@
+// 导入兜底策略引擎（用于 AI 返回不足 1 个 adjustment 时的后备策略）
+import { generateFallbackStrategy } from '../engine/FallbackStrategyEngine.js';
+
 /**
  * AI Prompt构建工具 - 智能调参版
  * 支持业务背景理解、数据洞察分析、智能建议生成
@@ -190,6 +193,121 @@ const buildMonthlySummary = (timeData) => {
 };
 
 // ==================== 模型结构构建 ====================
+
+/**
+ * 构建计算链路径（从目标指标反向追溯到驱动因子）
+ * @param {Object} nodes - 所有节点
+ * @param {string} targetNodeId - 目标节点 ID
+ * @returns {Array} 计算链路径，包含每一步的正向和逆向公式
+ */
+export const buildCalculationChain = (nodes, targetNodeId) => {
+  if (!targetNodeId || !nodes[targetNodeId]) return [];
+
+  const chain = [];
+  const visited = new Set();
+
+  const traverse = (nodeId, depth = 0) => {
+    if (visited.has(nodeId)) return;
+    visited.add(nodeId);
+
+    const node = nodes[nodeId];
+    if (!node) return;
+
+    if (node.formula && depth > 0) {
+      // 分析公式类型，生成逆向运算规则
+      const formula = node.formula;
+      let inverseRules = [];
+
+      // 简单公式解析：A = B op C 或 A = B op 常数
+      // 支持的运算符：+ - * / ² √ 等
+      const multiplyMatch = formula.match(/^([a-zA-Z_\u4e00-\u9fa5][a-zA-Z0-9_\u4e00-\u9fa5]*)\s*\*\s*([0-9.]+|[a-zA-Z_\u4e00-\u9fa5][a-zA-Z0-9_\u4e00-\u9fa5]*)$/);
+      const divideMatch = formula.match(/^([a-zA-Z_\u4e00-\u9fa5][a-zA-Z0-9_\u4e00-\u9fa5]*)\s*\/\s*([0-9.]+|[a-zA-Z_\u4e00-\u9fa5][a-zA-Z0-9_\u4e00-\u9fa5]*)$/);
+      const addMatch = formula.match(/^([a-zA-Z_\u4e00-\u9fa5][a-zA-Z0-9_\u4e00-\u9fa5]*)\s*\+\s*([a-zA-Z_\u4e00-\u9fa5][a-zA-Z0-9_\u4e00-\u9fa5]*)$/);
+      const subtractMatch = formula.match(/^([a-zA-Z_\u4e00-\u9fa5][a-zA-Z0-9_\u4e00-\u9fa5]*)\s*-\s*([a-zA-Z_\u4e00-\u9fa5][a-zA-Z0-9_\u4e00-\u9fa5]*)$/);
+      const powerMatch = formula.match(/^([a-zA-Z_\u4e00-\u9fa5][a-zA-Z0-9_\u4e00-\u9fa5]*)\s*\^?\*?\s*([0-9.]+)$/);
+      const sqrtMatch = formula.match(/√\s*([a-zA-Z_\u4e00-\u9fa5][a-zA-Z0-9_\u4e00-\u9fa5]*)/);
+
+      if (multiplyMatch) {
+        // A = B * C → B = A / C, C = A / B
+        const [, left, right] = multiplyMatch;
+        inverseRules.push({
+          type: 'multiply',
+          formula: `${node.name} = ${left} × ${right}`,
+          inverse: `若求 ${left}, 则 ${left} = ${node.name} / ${right}; 若求 ${right}, 则 ${right} = ${node.name} / ${left}`
+        });
+      } else if (divideMatch) {
+        // A = B / C → B = A × C, C = B / A
+        const [, left, right] = divideMatch;
+        inverseRules.push({
+          type: 'divide',
+          formula: `${node.name} = ${left} ÷ ${right}`,
+          inverse: `若求 ${left}, 则 ${left} = ${node.name} × ${right}; 若求 ${right}, 则 ${right} = ${left} / ${node.name}`
+        });
+      } else if (addMatch) {
+        // A = B + C → B = A - C, C = A - B
+        const [, left, right] = addMatch;
+        inverseRules.push({
+          type: 'add',
+          formula: `${node.name} = ${left} + ${right}`,
+          inverse: `若求 ${left}, 则 ${left} = ${node.name} - ${right}; 若求 ${right}, 则 ${right} = ${node.name} - ${left}`
+        });
+      } else if (subtractMatch) {
+        // A = B - C → B = A + C, C = B - A
+        const [, left, right] = subtractMatch;
+        inverseRules.push({
+          type: 'subtract',
+          formula: `${node.name} = ${left} - ${right}`,
+          inverse: `若求 ${left}, 则 ${left} = ${node.name} + ${right}; 若求 ${right}, 则 ${right} = ${left} - ${node.name}`
+        });
+      } else if (powerMatch) {
+        // A = B^n → B = A^(1/n), n = log_B(A)
+        const [, base, exp] = powerMatch;
+        inverseRules.push({
+          type: 'power',
+          formula: `${node.name} = ${base}^${exp}`,
+          inverse: `若求 ${base}, 则 ${base} = ${node.name}^(1/${exp}) = ${node.name} 的 ${exp} 次方根`
+        });
+      } else if (sqrtMatch) {
+        // A = √B → B = A²
+        const [, inside] = sqrtMatch;
+        inverseRules.push({
+          type: 'sqrt',
+          formula: `${node.name} = √${inside}`,
+          inverse: `若求 ${inside}, 则 ${inside} = ${node.name}²`
+        });
+      } else {
+        // 复杂公式，需要 AI 自己理解
+        inverseRules.push({
+          type: 'complex',
+          formula: `${node.name} = ${formula}`,
+          inverse: `请根据公式 ${formula} 反向推导各变量的值`
+        });
+      }
+
+      chain.push({
+        nodeId: node.id,
+        nodeName: node.name,
+        formula,
+        inverseRules,
+        depth
+      });
+    }
+
+    // 递归查找依赖
+    if (node.formula) {
+      const deps = node.formula.match(/[a-zA-Z_][a-zA-Z0-9_]*|[\u4e00-\u9fa5]+[a-zA-Z0-9_]*/g) || [];
+      deps.forEach(depId => {
+        const depNode = nodes[depId];
+        if (depNode) {
+          traverse(depId, depth + 1);
+        }
+      });
+    }
+  };
+
+  traverse(targetNodeId);
+  return chain.sort((a, b) => a.depth - b.depth);
+};
 
 /**
  * 构建增强的模型结构描述
@@ -441,23 +559,164 @@ export const buildSmartTuningPrompt = ({
   businessContext,
   targetNodeId = null,
   targetValue = null,
-  constraints = []
+  constraints = [],
+  knowledgeResults = [],
+  selectedScenarios = [],
+  consistencyResult = null, // 一致性验证结果
+  // 节点选择（新增）
+  selectedMetrics = [],
+  selectedDrivers = [],
+  nodeSelectorMode = 'auto' // 'auto' | 'manual'
 }) => {
+  console.log('[aiPromptBuilder] 收到节点选择:', { nodeSelectorMode, selectedMetrics, selectedDrivers });
+
   const modelStructure = buildModelStructure(nodes);
   const valueComparison = buildValueComparison(nodes, targetNodeId, targetValue);
   const sensitivity = calculateSensitivity(nodes, targetNodeId);
   const dataInsights = analyzeDataInsights(nodes);
+  const calculationChain = buildCalculationChain(nodes, targetNodeId); // 新增：计算链路径
 
   const targetNode = targetNodeId ? nodes[targetNodeId] : null;
 
-  const systemPrompt = `你是一位资深的业务分析和规划专家，擅长基于业务背景和数据洞察进行智能调参。
+  // 日志：检查模板变量
+  console.log('[aiPromptBuilder] 节点选择模式:', nodeSelectorMode);
+  console.log('[aiPromptBuilder] selectedDrivers 长度:', selectedDrivers.length);
+  console.log('[aiPromptBuilder] selectedMetrics 长度:', selectedMetrics.length);
+
+  // 处理知识库结果
+  let knowledgeContext = '';
+  if (knowledgeResults && knowledgeResults.length > 0) {
+    console.log('[buildSmartTuningPrompt] 知识库命中:', knowledgeResults.length, '条');
+    knowledgeContext = knowledgeResults.map(k => {
+      // 尝试从 factors 中提取关键因子
+      let factorNames = '无';
+      let factorResults = '无';
+
+      if (k.factors && k.factors.length > 0) {
+        factorNames = k.factors.map(f => f.factorName || f.name).filter(Boolean).join(', ') || '无';
+        factorResults = k.factors.map(f => f.result || '未知').filter(Boolean).join(', ') || '无';
+      } else {
+        // 如果 factors 为空，尝试从描述中提取关键词
+        const desc = k.description || k.scenario || '';
+        if (desc) {
+          // 简单提取：从描述中识别可能的因子名称（与节点匹配）
+          const matchedFactors = Object.values(nodes || {}).filter(n =>
+            n.type === 'driver' && desc.includes(n.name)
+          ).map(n => n.name);
+
+          if (matchedFactors.length > 0) {
+            factorNames = matchedFactors.join(', ');
+            factorResults = '基于历史经验推断';
+          }
+        }
+      }
+
+      return '- 标题：' + k.title + '\n  行业：' + (k.industry || '未指定') +
+        '\n  场景：' + (k.scenario || '未指定') +
+        '\n  关键因子：' + factorNames +
+        '\n  历史效果：' + factorResults;
+    }).join('\n');
+  }
+
+  // 构建知识库 Prompt
+  const knowledgeBasePrompt = knowledgeContext ? `\n【知识库参考】\n系统检索到以下历史案例供参考（以当前模型为准）：\n` + knowledgeContext + '\n' : '';
+
+  // 构建计算链 Prompt（新增）
+  let calculationChainPrompt = '';
+  if (calculationChain.length > 0) {
+    calculationChainPrompt = `\n【公式计算链与逆向推导规则】（极其重要！必须遵守！）
+
+**计算路径（从目标到驱动因子）**：
+${calculationChain.map((step, i) => `
+第${i + 1}步：${step.nodeName}
+  正向公式：${step.inverseRules[0]?.formula || step.formula}
+  逆向推导：${step.inverseRules[0]?.inverse || '请根据公式反向推导'}`).join('\n')}
+
+**逆向推导强制规则**（不遵守会导致计算错误！）：
+1. **从目标值开始反向推导**：用户目标是"净利润 350 万"，你必须先计算：
+   - 营业利润 = 净利润 / 0.75 = 350 / 0.75 = 466.67 万
+   - 然后才是：收入 - 成本 - 费用 = 466.67 万（不是 350 万！）
+
+2. **错误示例**（禁止这样计算！）：
+   - ❌ 错误：营业收入 1650 - 营业成本 825 - 费用 392 = 433 万 → 这就是净利润
+   - ❌ 错误原因：433 万是营业利润，不是净利润！净利润 = 433 × 0.75 = 324.75 万
+
+3. **正确示例**（必须这样计算！）：
+   - ✓ 正确：目标净利润 350 万 → 所需营业利润 = 350 / 0.75 = 466.67 万
+   - ✓ 然后：营业收入 - 营业成本 - 费用 = 466.67 万
+   - ✓ 验证：466.67 × 0.75 = 350 万（符合目标）
+
+4. **通用逆运算规则**：
+   - 如果公式是 Y = X × k（k 是系数），则 X = Y / k
+   - 如果公式是 Y = X / k，则 X = Y × k
+   - 如果公式是 Y = X + A，则 X = Y - A
+   - 如果公式是 Y = X - A，则 X = Y + A
+   - 如果公式是 Y = X^n，则 X = Y^(1/n)（开方）
+   - 如果公式是 Y = √X，则 X = Y²
+
+5. **计算验证步骤**（必须执行！）：
+   - 步骤 1：从用户目标值开始，用逆运算计算中间变量
+   - 步骤 2：根据中间变量推导驱动因子的调整值
+   - 步骤 3：用正向公式验证：驱动因子 → 中间变量 → 目标值 = 用户目标
+   - 步骤 4：如果验证不通过，重新调整
+`.trim();
+  }
+
+  // 处理场景模板（支持多选）
+  let scenarioPrompt = '';
+  let scenarioNames = [];
+
+  if (selectedScenarios && selectedScenarios.length > 0) {
+    scenarioNames = selectedScenarios.map(s => s.name || '自定义场景');
+    // 合并多个场景的 System Prompt
+    const scenarioPrompts = selectedScenarios
+      .map(s => s.systemPrompt || '')
+      .filter(Boolean);
+    scenarioPrompt = scenarioPrompts.join('\n\n---\n\n');
+    console.log('[buildSmartTuningPrompt] 使用场景模板:', scenarioNames);
+  }
+
+  const baseSystemPrompt = `你是一位资深的业务分析和规划专家，擅长基于业务背景和数据洞察进行智能调参。
 
 【核心任务】
 用户提供了业务背景和未来计划，你需要：
+
+**首要任务：正确理解指标计算链并执行逆运算**
+1. 仔细阅读【公式计算链与逆向推导规则】部分
+2. 从用户目标值开始，用**逆运算**计算中间变量
+   - 例如：目标净利润 350 万，公式 净利润 = 营业利润 × 0.75
+   - 逆运算：营业利润 = 350 / 0.75 = 466.67 万（不是用 收入 - 成本 - 费用 直接算！）
+3. 根据中间变量推导驱动因子的调整值
+4. 用正向公式验证：调整后的驱动因子代入公式 → 结果必须等于用户目标
+
+**关键警告**：
+- ❌ 错误：收入 1650 - 成本 825 - 费用 392 = 433 万 → "净利润 433 万"
+- ✓ 正确：目标净利润 350 万 → 营业利润 = 350 / 0.75 = 466.67 万 → 调整驱动因子使 收入 - 成本 - 费用 = 466.67 万
+
 1. 深入理解业务背景中的关键信息（时间节点、目标方向、资源约束、涉及的业务模块）
 2. 全面分析现有数据的趋势、敏感性和风险
 3. **根据业务背景识别所有需要调整的驱动因子**（不要只调整一个！）
 4. 为每个识别出的因子生成专业的调整建议
+
+【调整范围约束】
+${nodeSelectorMode === 'manual' && selectedDrivers.length > 0 ? `
+用户指定了可调整的驱动因子范围，你必须**优先在以下范围内选择**：
+${selectedDrivers.map(id => `- ${nodes[id]?.name || id}`).join('\n')}
+
+注意：
+- 如果业务背景中提到的因子不在上述范围内，你仍然可以建议，但需要在 explanation 中说明原因
+- 如果用户提示词与选择的因子冲突，以提示词为准（提示词优先级更高）
+` : `
+你可以调整任意驱动因子，根据业务背景和你的专业判断自主选择
+`}
+
+【计算指标选择】
+${nodeSelectorMode === 'manual' && selectedMetrics.length > 0 ? `
+用户选择了以下计算指标用于目标验证：
+${selectedMetrics.map(id => `- ${nodes[id]?.name || id}`).join('\n')}
+` : `
+目标验证指标将从业务背景中自动识别
+`}
 
 【关键原则】
 1. **多因子联动**：业务目标通常需要多个因子协同调整
@@ -496,45 +755,54 @@ export const buildSmartTuningPrompt = ({
 
 3. 调整方案 (adjustments)
    - **为每个识别出的驱动因子提供独立的调整对象**
-   - 每个对象包含完整的推荐值、理由、月度分配策略
 
 【输出格式要求】
-必须返回以下JSON格式（不要包含markdown代码块）：
+必须返回以下 JSON 格式（不要包含 markdown 代码块）：
+
+**【必填字段】calculationVerification（计算验证，用于确保逆运算正确执行）**
+在返回 adjustments 之前，你必须先填写此字段，展示逆运算过程：
+- targetMetric: 目标指标名称
+- targetValue: 目标值
+- formula: 目标指标的公式
+- inverseStep1: 第一步逆运算（如：营业利润 = 净利润 / 0.75 = XXX）
+- driverDerivation: 如何从驱动因子推导出中间变量的值
+- finalVerification: 代入公式验证是否等于目标值
+
+**注意**：如果不填写此字段或计算错误，你的方案将被拒绝！
+
+【重要 - 长度优化】
+由于输出长度限制，请严格遵守：
+1. **优先保证**：calculationVerification、adjustments 数组（至少 3-5 个因子）、expectedImpact、explanation 必须完整
+2. **简化描述**：understanding 每项≤50 字，dataAnalysis 每项≤30 字
+3. **不可省略**：dataAnalysis.trends 和 dataAnalysis.sensitivity 必须至少各包含 1 条（用于前端展示）
+4. **简洁第一**：用短语代替长句，如"Q4 旺季，10-12 月高峰"代替"当前处于年度规划阶段，10-12 月为传统旺季"
 
 {
+  "calculationVerification": {
+    "targetMetric": "净利润",
+    "targetValue": 350,
+    "formula": "净利润 = 营业利润 × 0.75",
+    "inverseStep1": "营业利润 = 350 / 0.75 = 466.67 万",
+    "driverDerivation": "营业收入 1650 - 营业成本 875 - 销售费用 256 - 管理费用 52.33 = 466.67 万",
+    "finalVerification": "466.67 × 0.75 = 350 万 ✓"
+  },
   "understanding": {
-    "businessContext": "AI对业务背景的理解摘要",
+    "businessContext": "AI 对业务背景的理解摘要",
     "timeContext": "识别的时间节点",
-    "keyGoals": ["目标1", "目标2"],
-    "constraints": ["约束1", "约束2"],
+    "keyGoals": ["目标 1", "目标 2"],
+    "constraints": ["约束 1", "约束 2"],
     "flexibleFactors": ["可调因子"],
     "rigidFactors": ["刚性因子"]
   },
   "dataAnalysis": {
     "trends": [
-      {
-        "factor": "因子名称",
-        "pattern": "上升/下降/波动/季节性",
-        "description": "趋势描述",
-        "seasonality": "季节性特征",
-        "deviation": "实际vs预测偏差"
-      }
+      {"factor": "营业收入", "pattern": "Q4 为传统旺季，10-12 月环比增长 30-40%", "seasonality": "旺季在 Q4"}
     ],
     "sensitivity": [
-      {
-        "factor": "因子名称",
-        "impact": "高/中/低",
-        "elasticity": 弹性系数,
-        "description": "影响说明"
-      }
+      {"factor": "管理费用", "impact": "high", "correlation": "positive", "elasticity": 1.0}
     ],
     "risks": [
-      {
-        "factor": "因子名称",
-        "riskLevel": "高/中/低",
-        "description": "风险描述",
-        "recommendation": "建议"
-      }
+      {"factor": "营业收入", "riskLevel": "中", "description": "历史预测偏差较大", "recommendation": "需紧密监控市场反馈"}
     ]
   },
   "adjustments": [
@@ -649,6 +917,13 @@ ${JSON.stringify(modelStructure.drivers, null, 2)}
 
 计算指标(${modelStructure.computed.length}个)：
 ${JSON.stringify(modelStructure.computed.slice(0, 5), null, 2)}${modelStructure.computed.length > 5 ? '\n...(还有' + (modelStructure.computed.length - 5) + '个指标)' : ''}
+${targetNodeId && nodes[targetNodeId] ? `
+【目标指标公式】（重要！）
+${nodes[targetNodeId].name} = ${nodes[targetNodeId].formula || "无公式"}
+注意：公式中的系数（如税率、毛利率等）已经内置，计算时必须考虑！` : ""}
+
+【公式计算链与逆向推导】（极其重要！）
+${calculationChainPrompt || '无计算链，目标指标直接由驱动因子计算得出'}
 
 三态数据（初始→当前）：
 ${JSON.stringify(valueComparison, null, 2)}
@@ -658,6 +933,33 @@ ${JSON.stringify(sensitivity.slice(0, 5), null, 2)}
 
 数据洞察：
 ${JSON.stringify(dataInsights, null, 2)}`;
+
+  // 如果有一致性验证结果，添加警告
+  let consistencyWarning = '';
+  if (consistencyResult && !consistencyResult.isConsistent && consistencyResult.warnings.length > 0) {
+    consistencyWarning = `
+
+
+【⚠️ 一致性警告】
+检测到以下不匹配情况，请谨慎处理：
+${consistencyResult.warnings.map(w => '- ' + w.message).join('\n')}
+
+建议：
+1. 检查是否选择了正确的知识库
+2. 确认指标模型是否符合当前业务场景
+3. 如果确认无误，可忽略此警告继续执行
+
+`;
+    console.log('[buildSmartTuningPrompt] 检测到一致性警告:', consistencyResult.warnings.length);
+  }
+
+  // 如果有场景模板，将场景模板作为补充说明追加
+  const systemPrompt = (consistencyWarning + knowledgeBasePrompt + scenarioPrompt)
+    ? `${baseSystemPrompt}
+
+【场景模板补充说明】
+${scenarioPrompt}`
+    : baseSystemPrompt;
 
   // 构建用户Prompt
   let userPrompt = '';
@@ -689,6 +991,38 @@ ${JSON.stringify(dataInsights, null, 2)}`;
   }
 
   userPrompt += `请基于以上信息，生成完整的智能调参方案。
+
+【逆向推导强制规则】（极其重要！必须先逆向后推导！）
+
+**计算步骤**（必须严格按此顺序执行！）：
+1. **步骤 1：识别用户目标值**
+   - 例如：用户目标是"净利润 350 万"
+
+2. **步骤 2：从【公式计算链】中查找目标指标的公式**
+   - 例如：净利润 = 营业利润 × 0.75
+
+3. **步骤 3：使用逆运算计算中间变量**（关键！）
+   - 例如：营业利润 = 净利润 / 0.75 = 350 / 0.75 = 466.67 万
+   - 注意：不是用 收入 - 成本 - 费用 直接计算！
+
+4. **步骤 4：从中间变量推导驱动因子的调整值**
+   - 例如：收入 - 成本 - 费用 = 466.67 万（不是 350 万！）
+
+5. **步骤 5：正向验证**（必须执行！）
+   - 用你的调整方案代入正向公式：
+   - 营业利润 = 调整后收入 - 调整后成本 - 调整后费用
+   - 净利润 = 营业利润 × 0.75
+   - 验证：计算结果是否等于用户目标 350 万？
+   - 如果不等于，重新调整！
+
+**错误示例**（禁止这样计算！）：
+- ❌ 调整后收入 1650 - 成本 825 - 费用 392 = 433 万 → "这就是净利润"
+- ❌ 错误原因：433 万是营业利润！净利润 = 433 × 0.75 = 324.75 万 ≠ 目标 350 万
+
+**正确示例**（必须这样计算！）：
+- ✓ 目标净利润 350 万 → 所需营业利润 = 350 / 0.75 = 466.67 万
+- ✓ 然后调整驱动因子使：收入 - 成本 - 费用 = 466.67 万
+- ✓ 验证：466.67 × 0.75 = 350 万 ✓
 
 【极其重要的多因子要求】
 1. **不要只调整一个营业收入！** 业务目标需要多个因子协同调整
@@ -743,35 +1077,44 @@ ${JSON.stringify(dataInsights, null, 2)}`;
 4. 每个调整建议都有数据依据和业务理由
 5. 提供乐观/基准/悲观三种情景的预期效果
 
+
 【关键计算验证】
 在生成调整方案后，你必须进行以下验证：
 
 1. **目标识别**：从业务背景中识别用户的目标指标和目标值
-   - 如"净利润达到350万"→目标指标是净利润，目标值是350万
-   - 如"毛利率提升至55%"→目标指标是毛利率，目标值是55%
-   - 如"收入突破2000万"→目标指标是营业收入，目标值是2000万
+   - 如"净利润达到 350 万"→目标指标是净利润，目标值是 350 万
+   - 如"毛利率提升至 55%"→目标指标是毛利率，目标值是 55%
+   - 如"收入突破 2000 万"→目标指标是营业收入，目标值是 2000 万
 
-2. **计算验证**：根据调整方案计算预期结果
-   - 净利润 = 营业收入 - 营业成本 - 销售费用 - 管理费用 - 财务费用
-   - 毛利率 = (营业收入 - 营业成本) / 营业收入 × 100%
-   - 根据 adjustments 中的推荐值，计算目标指标的预期值
+2. **公式系数识别**（极其重要！）
+   - 如果目标指标公式中包含系数（如税率、毛利率等），计算时**必须使用这些系数**！
+   - 例如：净利润 = 营业利润 × 0.75（税率 25%）
+     - **正向计算**：营业利润 466.67 × 0.75 = 净利润 350 ✓
+     - **反向推导**：如果目标净利润 350，则 所需营业利润 = 350 ÷ 0.75 = 466.67
+   - 你看到的"目标指标公式"中，系数（如 0.75、0.25 等）是公式的一部分，必须参与计算！
 
-3. **差距分析**：对比预期值与目标值
+3. **计算验证**：根据调整方案计算预期结果
+   - 如果公式是 A = B × C，则 B = A / C，C = A / B
+   - 如果公式是 A = B × 系数，则 B = A / 系数
+   - 例如：
+     - 净利润 = 营业利润 × 0.75 → 营业利润 = 净利润 / 0.75
+     - 毛利润 = 营业收入 × 毛利率 → 营业收入 = 毛利润 / 毛利率
+   - 根据 adjustments 中的推荐值，使用正确的公式计算目标指标的预期值
+
+4. **差距分析**：对比预期值与目标值
    - 如果预期值 >= 目标值：说明方案可以达成目标
    - 如果预期值 < 目标值：说明方案**无法达成目标**，必须在 explanation 中明确说明
 
-4. **不达标处理**：如果无法达成目标，必须在 explanation 中说明：
+5. **不达标处理**：如果无法达成目标，必须在 explanation 中说明：
    - 当前方案的预期结果是什么
    - 距离目标还差多少
-   - 建议用户如何调整（如"需要额外增加收入XX万"或"需要降低费用XX万"）
+   - 建议用户如何调整（如"需要额外增加收入 XX 万"或"需要降低费用 XX 万"）
    - 或者明确告知"根据当前条件，目标无法达成"
 
 示例说明：
-- 如果用户要求净利润350万，但你的调整只能达到300万，必须说明：
-  "根据当前调整方案（收入1650万，成本660万，费用420万），预期净利润为570万，已达到目标350万。"
-  或
-  "根据当前调整方案，预期净利润为280万，距离目标350万还差70万。建议：进一步增加收入50万或降低费用20万。"`;
-
+- 如果用户要求净利润 350 万，公式是 净利润 = 营业利润 × 0.75：
+  - 正确计算：所需营业利润 = 350 / 0.75 = 466.67 万
+  - 错误计算：营业利润 = 350 万（忽略了 0.75 系数）✗`;
   return {
     system: systemPrompt,
     user: userPrompt,
@@ -935,7 +1278,9 @@ export const buildTuningPrompt = ({
   targetNodeId = null,
   targetValue = null,
   lockedNodes = [],
-  constraints = []
+  constraints = [],
+  knowledgeResults = [],
+  selectedScenarios = []
 }) => {
   const modelStructure = buildModelStructure(nodes);
   const valueComparison = buildValueComparison(nodes, targetNodeId, targetValue);
@@ -1128,34 +1473,159 @@ const tryParseJson = (response) => {
     return result;
   } catch {}
 
-  // 方法5: 逐行修复（处理JSON中的语法错误）
+  // 方法 5: 提取最大的 JSON 对象（顶层对象）
   try {
-    // 提取所有可能是JSON的部分
-    const possibleJsons = [];
-    const braceMatches = response.match(/\{[\s\S]*?\}/g);
-    if (braceMatches) {
-      for (const match of braceMatches) {
-        try {
-          const cleaned = cleanJsonString(match);
-          const parsed = JSON.parse(cleaned);
-          if (parsed && (parsed.adjustments || parsed.recommendations)) {
-            console.log('tryParseJson: 方法5成功（找到包含adjustments的JSON）');
-            return parsed; // 找到了有效的调参结果
-          }
-          possibleJsons.push(parsed);
-        } catch {}
+    // 找到第一个 { 和最后一个 } 之间的内容（这应该是最大的 JSON 对象）
+    const startIdx = response.indexOf('{');
+    const endIdx = response.lastIndexOf('}');
+    if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+      const jsonStr = response.substring(startIdx, endIdx + 1);
+      const cleaned = cleanJsonString(jsonStr);
+      const parsed = JSON.parse(cleaned);
+      
+      // 检查是否包含 understanding 和 adjustments
+      if (parsed && (parsed.understanding || parsed.adjustments || parsed.recommendations)) {
+        console.log('tryParseJson: 方法 5 成功（提取最大 JSON 对象）');
+        console.log('方法 5 解析对象字段:', Object.keys(parsed).join(', '));
+        return parsed;
       }
     }
-    // 返回最大的对象
-    if (possibleJsons.length > 0) {
-      console.log('tryParseJson: 方法5返回最大对象');
-      return possibleJsons.reduce((max, curr) =>
-        JSON.stringify(curr).length > JSON.stringify(max).length ? curr : max
-      );
-    }
-  } catch {}
+  } catch (e) {
+    console.log('方法 5 失败:', e.message);
+  }
 
   // 方法6: 尝试修复常见AI返回的JSON错误
+
+  // 方法 5.5: 尝试修复截断的 JSON（AI 响应长度限制）
+  try {
+    // 如果响应看起来像被截断的 JSON（有 understanding 但没有结尾）
+    if (response.includes('"understanding"') && !response.trim().endsWith('}')) {
+      console.log('tryParseJson: 检测到 JSON 可能被截断，尝试修复...');
+
+      const truncated = response.trim();
+
+      // 策略1：尝试简单的闭合
+      const simpleFixes = [
+        truncated + '}]\\n}\\n}\\n}\\n}',
+        truncated + '}]\\n}\\n}',
+        truncated + ']}\\n}',
+        truncated + '}]}',
+        truncated + '}}',
+      ];
+
+      for (const fix of simpleFixes) {
+        try {
+          const cleaned = cleanJsonString(fix);
+          const parsed = JSON.parse(cleaned);
+          if (parsed && (parsed.understanding || parsed.adjustments)) {
+            console.log('tryParseJson: 方法 5.5 成功（简单闭合修复）');
+            return parsed;
+          }
+        } catch {}
+      }
+
+      // 策略2：从后往前找最后一个完整的键值对，然后闭合
+      console.log('tryParseJson: 简单闭合失败，尝试截断修复...');
+
+      // 找到最后一个完整的"key": 结构
+      const lastKeyMatch = [...truncated.matchAll(/"([a-zA-Z]+)":\s*/g)].pop();
+      if (lastKeyMatch) {
+        const cutPosition = lastKeyMatch.index;
+        // 截断到最后一个完整键之前
+        const partialJson = truncated.substring(0, cutPosition);
+
+        // 尝试闭合
+        const partialFixes = [
+          partialJson + ']',
+          partialJson + '}]',
+          partialJson + '}}',
+          partialJson + '}]\\n}\\n}',
+        ];
+
+        for (const fix of partialFixes) {
+          try {
+            const cleaned = cleanJsonString(fix);
+            const parsed = JSON.parse(cleaned);
+            if (parsed && (parsed.understanding || parsed.adjustments)) {
+              console.log('tryParseJson: 方法 5.5 成功（截断修复）');
+              // 添加警告说明数据可能不完整
+              parsed._truncated = true;
+              return parsed;
+            }
+          } catch {}
+        }
+      }
+
+      // 策略 3：提取所有能解析的顶层字段
+      console.log('tryParseJson: 截断修复失败，尝试提取部分数据...');
+      const partialResult = {};
+
+      // 使用正则表达式直接提取 understanding 对象
+      // 匹配 "understanding": { ... } 直到下一个顶层字段
+      const understandingRegex = /"understanding"\s*:\s*(\{(?:[^{}]+|\{(?:[^{}]+|\{[^{}]*\})*\})*\})/;
+      const understandingMatch = truncated.match(understandingRegex);
+      if (understandingMatch && understandingMatch[1]) {
+        try {
+          partialResult.understanding = JSON.parse(understandingMatch[1]);
+          console.log('成功提取 understanding:', Object.keys(partialResult.understanding));
+        } catch (e) {
+          console.log('提取 understanding 失败:', e.message);
+          // 尝试更简单的方式：找到最后一个完整的键值对
+          const simpleUnderstanding = truncated.substring(
+            truncated.indexOf('"understanding"'),
+            truncated.indexOf('"dataAnalysis"') > 0 ? truncated.indexOf('"dataAnalysis"') : truncated.length
+          ).trim();
+          // 移除末尾的逗号
+          const cleaned = simpleUnderstanding.replace(/,\s*$/, '');
+          try {
+            partialResult.understanding = JSON.parse('{' + cleaned + '}').understanding;
+            console.log('成功提取 understanding (简化方式)');
+          } catch {}
+        }
+      }
+
+      // 尝试提取 adjustments 数组
+      const adjustmentsRegex = /"adjustments"\s*:\s*(\[(?:[^\[\]]+|\[(?:[^\[\]]+|\[[^\[\]]*\])*\])*\])/;
+      const adjustmentsMatch = truncated.match(adjustmentsRegex);
+      if (adjustmentsMatch && adjustmentsMatch[1]) {
+        try {
+          const adjustments = JSON.parse(adjustmentsMatch[1]);
+          if (Array.isArray(adjustments) && adjustments.length > 0) {
+            partialResult.adjustments = adjustments;
+            partialResult.recommendations = adjustments;
+            console.log('成功提取 adjustments:', adjustments.length, '个');
+          }
+        } catch (e) {
+          console.log('提取 adjustments 失败:', e.message);
+          // 尝试手动解析：找到每个完整的 adjustment 对象
+          const adjRegex = /(\{"nodeId"[^}]*\}(?=\s*,\s*{"nodeId"}|\s*\]))/g;
+          const adjMatches = [...truncated.matchAll(adjRegex)];
+          const parsedAdjs = [];
+          for (const m of adjMatches) {
+            try {
+              parsedAdjs.push(JSON.parse(m[1]));
+            } catch {}
+          }
+          if (parsedAdjs.length > 0) {
+            partialResult.adjustments = parsedAdjs;
+            partialResult.recommendations = parsedAdjs;
+            console.log('成功提取 adjustments (手动解析):', parsedAdjs.length, '个');
+          }
+        }
+      }
+
+      // 如果至少提取到一个字段，返回部分结果
+      if (Object.keys(partialResult).length > 0) {
+        console.log('tryParseJson: 方法 5.5 成功（提取部分数据）');
+        partialResult._truncated = true;
+        partialResult._warning = 'AI 响应被截断，部分数据可能丢失';
+        return partialResult;
+      }
+    }
+  } catch (e) {
+    console.log('方法 5.5 失败:', e.message);
+  }
+
   try {
     // 有时AI返回的是JavaScript对象字面量而非JSON
     // 尝试将单引号替换为双引号
@@ -1251,9 +1721,17 @@ export const parseAIResponse = (response, options = {}) => {
     console.log('AI响应adjustments:', parsed.adjustments);
     console.log('AI响应recommendations:', parsed.recommendations);
 
-    // 验证必要字段
-    if (!parsed.recommendations && !parsed.adjustments) {
-      console.warn('AI响应缺少recommendations/adjustments字段');
+    // 验证必要字段（只在完全没有 adjustments 且没有 expectedImpact 时才警告）
+    if ((!parsed.recommendations && !parsed.adjustments) && !parsed.expectedImpact) {
+      console.log('AI 响应缺少 recommendations/adjustments 字段，但可能有 expectedImpact（第二次请求）');
+    }
+    // 验证必要字段（只在完全没有 adjustments 且没有 expectedImpact 时才警告）
+    if ((!parsed.recommendations && !parsed.adjustments) && !parsed.expectedImpact) {
+      console.log('AI 响应缺少 recommendations/adjustments 字段，但可能有 expectedImpact（第二次请求）');
+    }
+    // 验证必要字段（只在完全没有 adjustments 且没有 expectedImpact 时才警告）
+    if ((!parsed.recommendations && !parsed.adjustments) && !parsed.expectedImpact) {
+      console.log('AI 响应缺少 recommendations/adjustments 字段，但可能有 expectedImpact（第二次请求）');
     }
 
     // 统一字段名（新旧版本兼容）
@@ -1300,13 +1778,20 @@ export const parseAIResponse = (response, options = {}) => {
 
         // 根据因子名称创建对应的调整
         const trend = parsed.dataAnalysis.trends.find(t => t.factor === factorName);
-        const newAdjustment = createAdjustmentForFactor(
-          factorName,
-          trend,
-          existingAdjustment,
-          options.originalContext || parsed.understanding?.businessContext || '',
-          parsed.dataAnalysis || options.dataAnalysis || null
-        );
+        // 使用兜底策略引擎生成调整建议
+        const fallbackResult = generateFallbackStrategy({
+          nodes: options.nodes || {},
+          sensitivityData: (parsed.dataAnalysis?.sensitivity || []).map(s => ({
+            factorId: s.factorId || s.factor,
+            factorName: s.factor,
+            sensitivity: s.sensitivity || s.impact || 0.5,
+            correlation: s.correlation || 'positive',
+            elasticity: s.elasticity || 0.5
+          })),
+          stdDevData: []
+        });
+        const newAdjustments = fallbackResult?.allAdjustments || [];
+        const newAdjustment = newAdjustments.find(a => a.nodeName === factorName) || null;
 
         if (newAdjustment) {
           additionalAdjustments.push(newAdjustment);
@@ -1323,68 +1808,6 @@ export const parseAIResponse = (response, options = {}) => {
       }
     }
 
-    // **超级后备机制**：如果仍然只有1个adjustment，根据业务背景关键词强制创建
-    if (parsed.adjustments?.length === 1) {
-      console.log('仍然只有1个adjustment，启动超级后备机制根据业务背景创建');
-      const businessContext = options.originalContext || parsed.understanding?.businessContext || '';
-      const existingAdjustment = parsed.adjustments[0];
-      const existingFactorName = existingAdjustment.nodeName;
-
-      // 从业务背景中识别应该调整但未调整的因子
-      const contextLower = businessContext.toLowerCase();
-      const missingFactors = [];
-
-      // 检查收入类因子（如果没有）
-      if (!existingFactorName.includes('收入') && !existingFactorName.includes('营收')) {
-        if (contextLower.includes('收入') || contextLower.includes('营收') || contextLower.includes('增长')) {
-          missingFactors.push({ type: 'revenue', name: '营业收入' });
-        }
-      }
-
-      // 检查成本类因子（如果没有）
-      if (!existingFactorName.includes('成本')) {
-        if (contextLower.includes('成本') || contextLower.includes('毛利')) {
-          missingFactors.push({ type: 'cost', name: '营业成本' });
-        }
-      }
-
-      // 检查销售费用（如果没有）
-      if (!existingFactorName.includes('销售') && !existingFactorName.includes('营销') && !existingFactorName.includes('推广')) {
-        if (contextLower.includes('销售费用') || contextLower.includes('营销') || contextLower.includes('推广') || contextLower.includes('广告') || contextLower.includes('市场')) {
-          missingFactors.push({ type: 'sales_expense', name: '销售费用' });
-        }
-      }
-
-      // 检查管理费用（如果没有）
-      if (!existingFactorName.includes('管理')) {
-        if (contextLower.includes('管理费用') || contextLower.includes('优化') || contextLower.includes('降低') || contextLower.includes('压缩')) {
-          missingFactors.push({ type: 'mgmt_expense', name: '管理费用' });
-        }
-      }
-
-      console.log('根据业务背景识别到缺失的因子:', missingFactors);
-
-      const superAdjustments = [];
-      missingFactors.forEach(({ type, name }) => {
-        const newAdjustment = createAdjustmentForFactor(
-          name,
-          { pattern: 'unknown' },
-          existingAdjustment,
-          businessContext,
-          parsed.dataAnalysis || options.dataAnalysis || null
-        );
-        if (newAdjustment) {
-          superAdjustments.push(newAdjustment);
-          console.log('超级后备：为', name, '创建调整');
-        }
-      });
-
-      if (superAdjustments.length > 0) {
-        parsed.adjustments = [...parsed.adjustments, ...superAdjustments];
-        parsed.recommendations = parsed.adjustments;
-        console.log('超级后备机制完成，新增', superAdjustments.length, '个adjustments，总计', parsed.adjustments.length, '个');
-      }
-    }
 
     // 扫描模式判断
     if (parsed.isOptimal && parsed.expectedResult?.gapClosed !== undefined) {
@@ -1462,166 +1885,7 @@ export default {
  * @param {Object} dataAnalysis - 数据分析结果，包含nodes用于获取真实值
  * @returns {Object} 调整建议
  */
-const createAdjustmentForFactor = (factorName, trend, referenceAdjustment, businessContext, dataAnalysis = null) => {
-  const context = businessContext.toLowerCase();
 
-  // 营业收入 - 通常需要增长
-  if (factorName.includes('收入') || factorName.includes('营收') || factorName.includes('sales')) {
-    // 从模型数据获取真实值
-    const nodeInfo = findNodeRealValue(dataAnalysis, ['营业收入', '收入', '营收', '销售收入'], 1450);
-    const currentValue = nodeInfo.currentValue;
-    // 推荐值基于趋势或默认增长15%
-    const growthPercent = trend?.suggestion?.includes('上调') ? 0.20 : 0.15;
-    const recommendedValue = Math.round(currentValue * (1 + growthPercent));
-
-    return {
-      nodeId: nodeInfo.nodeId || factorName,
-      nodeName: nodeInfo.nodeName || factorName,
-      currentValue,
-      recommendedValue,
-      changePercent: Math.round((recommendedValue - currentValue) / currentValue * 100 * 100) / 100,
-      changeReason: 'Q4销售旺季，加大市场推广力度',
-      dataBasis: `基于业务目标增长至${recommendedValue}万，Q4季节性增长${Math.round(growthPercent * 100)}%`,
-      businessReason: '配合双11、双12促销，实现全年净利润目标',
-      riskWarning: '需确保推广执行到位，竞争加剧可能影响转化率',
-      monthlyStrategy: '前低后高，11-12月重点爆发',
-      monthlyFactors: [0.85, 0.85, 0.9, 0.95, 0.95, 1.0, 1.05, 1.1, 1.15, 1.25, 1.35, 1.4],
-      confidence: 0.85,
-      derived: true
-    };
-  }
-
-  // 营业成本 - 与收入挂钩
-  if (factorName.includes('成本') || factorName.includes('cost')) {
-    // 从模型数据获取真实值
-    const nodeInfo = findNodeRealValue(dataAnalysis, ['营业成本', '成本', '生产成本', '制造费用'], 725);
-    const currentCost = nodeInfo.currentValue;
-
-    // 成本与收入同比例变化（如果参考调整是收入类）
-    let recommendedCost = currentCost;
-    if (referenceAdjustment?.nodeName?.includes('收入') || referenceAdjustment?.nodeName?.includes('营收')) {
-      const revenueChangePercent = (referenceAdjustment.recommendedValue - referenceAdjustment.currentValue) / referenceAdjustment.currentValue;
-      recommendedCost = currentCost * (1 + revenueChangePercent * 0.8); // 成本增长是收入增长的80%
-    } else {
-      // 默认增长5%
-      recommendedCost = currentCost * 1.05;
-    }
-
-    const changePercent = Math.round((recommendedCost - currentCost) / currentCost * 100 * 100) / 100;
-
-    return {
-      nodeId: nodeInfo.nodeId || factorName,
-      nodeName: nodeInfo.nodeName || factorName,
-      currentValue: Math.round(currentCost),
-      recommendedValue: Math.round(recommendedCost),
-      changePercent: changePercent || 5,
-      changeReason: '与营业收入挂钩，保持毛利率稳定',
-      dataBasis: `基于模型真实当前值${currentCost}万，成本与收入同比例增长`,
-      businessReason: '维持稳定的盈利能力，支撑利润目标',
-      riskWarning: '需监控原材料成本波动',
-      monthlyStrategy: '与收入同步增长',
-      monthlyFactors: [0.85, 0.85, 0.9, 0.95, 0.95, 1.0, 1.05, 1.1, 1.15, 1.25, 1.35, 1.4],
-      confidence: 0.8,
-      derived: true
-    };
-  }
-
-  // 销售费用 - 推广相关
-  if (factorName.includes('销售费用') || factorName.includes('营销') || factorName.includes('推广')) {
-    const hasPromotion = context.includes('推广') || context.includes('市场') || context.includes('广告');
-    // 从模型数据获取真实值
-    const nodeInfo = findNodeRealValue(dataAnalysis, ['销售费用', '营销费用', '推广费用', '市场费用'], 231);
-    const currentValue = nodeInfo.currentValue;
-    // 如果有推广关键词，增加10-15%
-    const increasePercent = hasPromotion ? 0.12 : 0.05;
-    const recommendedValue = Math.round(currentValue * (1 + increasePercent));
-
-    return {
-      nodeId: nodeInfo.nodeId || factorName,
-      nodeName: nodeInfo.nodeName || factorName,
-      currentValue,
-      recommendedValue,
-      changePercent: Math.round((recommendedValue - currentValue) / currentValue * 100 * 100) / 100,
-      changeReason: hasPromotion ? '加大市场推广投入，支持Q4冲刺' : '适度增加销售费用',
-      dataBasis: hasPromotion ? `基于模型真实当前值${currentValue}万，推广需求增加${Math.round(increasePercent * 100)}%` : '适度增加以支撑收入增长',
-      businessReason: '配合营业收入增长，增加广告投放和渠道推广',
-      riskWarning: '需监控转化率，若ROI低于预期则及时调整',
-      monthlyStrategy: '重点月份（11月双11、12月双12重点投入）',
-      monthlyFactors: [0.7, 0.7, 0.75, 0.8, 0.8, 0.85, 0.9, 0.95, 1.0, 1.3, 1.5, 1.6],
-      confidence: 0.8,
-      derived: true
-    };
-  }
-
-  // 管理费用 - 优化相关
-  if (factorName.includes('管理费用') || factorName.includes('行政')) {
-    const hasOptimization = context.includes('优化') || context.includes('降低') || context.includes('压缩');
-    // 从模型数据获取真实值
-    const nodeInfo = findNodeRealValue(dataAnalysis, ['管理费用', '行政费用', '管理成本'], 144);
-    const currentValue = nodeInfo.currentValue;
-    // 如果有优化关键词，降低5-8%
-    const changePercent = hasOptimization ? -0.06 : 0;
-    const recommendedValue = Math.round(currentValue * (1 + changePercent));
-
-    return {
-      nodeId: nodeInfo.nodeId || factorName,
-      nodeName: nodeInfo.nodeName || factorName,
-      currentValue,
-      recommendedValue,
-      changePercent: Math.round((recommendedValue - currentValue) / currentValue * 100 * 100) / 100,
-      changeReason: hasOptimization ? '数字化工具上线，流程优化见效' : '保持管理费用稳定',
-      dataBasis: hasOptimization ? `基于模型真实当前值${currentValue}万，目标优化${Math.abs(Math.round(changePercent * 100))}%` : '管理费用保持稳定',
-      businessReason: '提升运营效率，通过流程改进降低成本',
-      riskWarning: '需避免过度压缩影响员工积极性',
-      monthlyStrategy: '平均分配，保持稳定',
-      monthlyFactors: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-      confidence: 0.75,
-      derived: true
-    };
-  }
-
-  // 研发费用
-  if (factorName.includes('研发') || factorName.includes('rd')) {
-    // 从模型数据获取真实值
-    const nodeInfo = findNodeRealValue(dataAnalysis, ['研发费用', '研发支出', '研发投入', '研发成本'], 70);
-    const currentValue = nodeInfo.currentValue;
-    // 默认增加10%
-    const recommendedValue = Math.round(currentValue * 1.10);
-
-    return {
-      nodeId: nodeInfo.nodeId || factorName,
-      nodeName: nodeInfo.nodeName || factorName,
-      currentValue,
-      recommendedValue,
-      changePercent: Math.round((recommendedValue - currentValue) / currentValue * 100),
-      changeReason: '加大研发投入，提升产品竞争力',
-      dataBasis: `基于模型真实当前值${currentValue}万，适度增加投入10%`,
-      businessReason: '支持长期发展，增强技术壁垒',
-      riskWarning: '需关注投入产出比',
-      monthlyStrategy: '按项目进度分配',
-      monthlyFactors: [1.0, 1.0, 1.1, 1.1, 1.1, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-      confidence: 0.7,
-      derived: true
-    };
-  }
-
-  // 默认：返回一个通用的调整
-  return {
-    nodeId: factorName.toLowerCase().replace(/\s+/g, '_'),
-    nodeName: factorName,
-    currentValue: 100,
-    recommendedValue: 110,
-    changePercent: 10,
-    changeReason: '基于业务背景和数据分析',
-    dataBasis: 'AI分析建议调整',
-    businessReason: '支持业务目标达成',
-    riskWarning: '需监控调整效果',
-    monthlyStrategy: '平均分配',
-    monthlyFactors: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-    confidence: 0.6,
-    derived: true
-  };
-};
 
 // ==================== 智能推导机制 ====================
 
@@ -1630,337 +1894,3 @@ const createAdjustmentForFactor = (factorName, trend, referenceAdjustment, busin
  * @param {string} businessContext - 业务背景描述
  * @returns {Array} 匹配到的因子类型列表
  */
-const extractFactorsFromContext = (businessContext) => {
-  if (!businessContext) {
-    console.log('智能推导：业务背景为空');
-    return [];
-  }
-
-  const context = businessContext.toLowerCase();
-  const factors = [];
-
-  // 定义关键词映射（通用化，不限于财务）
-  const keywordMap = {
-    'revenue': {
-      keywords: ['收入', '营收', '销售额', '营业额', 'revenue', 'sales', 'income', '营业收入'],
-      type: '收入类'
-    },
-    'marketing': {
-      keywords: ['推广', '营销', '广告', '销售费用', 'marketing', 'promotion', 'advertising', '投放', '市场'],
-      type: '营销类'
-    },
-    'management': {
-      keywords: ['管理', '优化', '管理费用', '行政', 'management', 'administrative', '流程改进'],
-      type: '管理类'
-    },
-    'cost': {
-      keywords: ['成本', '生产成本', '营业成本', 'cost', 'production', '制造费用'],
-      type: '成本类'
-    },
-    'rd': {
-      keywords: ['研发', '研发支出', 'rd', 'research', 'development', '技术投入'],
-      type: '研发类'
-    },
-    'hr': {
-      keywords: ['人力', '人力成本', '工资', '薪酬', 'hr', 'salary', 'payroll', '员工'],
-      type: '人力类'
-    },
-    'quality': {
-      keywords: ['质量', '质检', '返工', '质量成本', 'quality', 'inspection', '检验'],
-      type: '质量类'
-    },
-    'finance': {
-      keywords: ['财务', '利息', '财务费用', 'finance', 'interest', '利率'],
-      type: '财务类'
-    }
-  };
-
-  // 检查每个关键词类别
-  Object.entries(keywordMap).forEach(([factorType, config]) => {
-    const hasMatch = config.keywords.some(keyword => context.includes(keyword));
-    if (hasMatch) {
-      factors.push({
-        type: factorType,
-        category: config.type,
-        keywords: config.keywords,
-        matchedKeyword: config.keywords.find(k => context.includes(k))
-      });
-      console.log('智能推导：检测到因子类型', factorType, '通过关键词:', config.keywords.find(k => context.includes(k)));
-    }
-  });
-
-  console.log('智能推导：总共检测到', factors.length, '个因子类型');
-  return factors;
-};
-
-/**
- * 智能推导额外的adjustments
- * @param {Object} existingAdjustment - AI返回的现有adjustment
- * @param {string} businessContext - 业务背景
- * @param {Object} dataAnalysis - 数据分析结果
- * @returns {Array} 额外的adjustments
- */
-const deriveAdditionalAdjustments = (existingAdjustment, businessContext, dataAnalysis) => {
-  const additional = [];
-  const detectedFactors = extractFactorsFromContext(businessContext);
-
-  console.log('智能推导：检测到的因子类型', detectedFactors.map(f => f.category));
-  console.log('智能推导：现有调整项', existingAdjustment.nodeName, existingAdjustment.nodeId);
-
-  // 从模型结构中获取所有驱动因子（用于查找正确的nodeId）
-  // 注意：这里假设dataAnalysis中包含模型信息，或者我们需要从其他地方获取
-
-  // 如果检测到营销类因子但AI没调整营销费用
-  const hasMarketing = detectedFactors.some(f => f.type === 'marketing');
-  const isRevenueAdjustment = existingAdjustment.nodeName?.includes('收入') ||
-                               existingAdjustment.nodeName?.includes('营收') ||
-                               existingAdjustment.nodeName?.includes('成本'); // 扩展判断
-
-  console.log('智能推导：是否收入类调整?', isRevenueAdjustment, '是否有营销?', hasMarketing);
-
-  // 如果调整的是收入类，且背景提到营销/推广，则添加营销费用调整
-  if (hasMarketing) {
-    console.log('智能推导：准备添加营销费用调整');
-    const marketingAdjustment = deriveMarketingAdjustment(existingAdjustment);
-    if (marketingAdjustment) {
-      // 从模型数据中匹配正确的nodeId和currentValue
-      const nodeInfo = findNodeRealValue(dataAnalysis, ['销售费用', '营销费用', '广告费'], 231);
-      if (nodeInfo.found) {
-        marketingAdjustment.nodeId = nodeInfo.nodeId;
-        marketingAdjustment.nodeName = nodeInfo.nodeName;
-        marketingAdjustment.currentValue = nodeInfo.currentValue;
-        // 重新计算推荐值（增加12%）
-        marketingAdjustment.recommendedValue = Math.round(nodeInfo.currentValue * 1.12);
-        marketingAdjustment.changePercent = Math.round((marketingAdjustment.recommendedValue - nodeInfo.currentValue) / nodeInfo.currentValue * 100 * 100) / 100;
-        marketingAdjustment.dataBasis = `基于模型真实当前值${nodeInfo.currentValue}万，推广需求增加12%`;
-      } else if (dataAnalysis) {
-        marketingAdjustment.nodeId = nodeInfo.nodeId;
-        marketingAdjustment.nodeName = nodeInfo.nodeName;
-      }
-      additional.push(marketingAdjustment);
-      console.log('智能推导：已添加营销费用调整', marketingAdjustment);
-    }
-  }
-
-  // 如果检测到管理类因子，添加管理费用调整
-  const hasManagement = detectedFactors.some(f => f.type === 'management');
-  if (hasManagement) {
-    console.log('智能推导：准备添加管理费用调整');
-    const mgmtAdjustment = deriveManagementAdjustment(existingAdjustment);
-    if (mgmtAdjustment) {
-      // 从模型数据中匹配正确的nodeId和currentValue
-      const nodeInfo = findNodeRealValue(dataAnalysis, ['管理费用', '行政费用', '管理成本'], 144);
-      if (nodeInfo.found) {
-        mgmtAdjustment.nodeId = nodeInfo.nodeId;
-        mgmtAdjustment.nodeName = nodeInfo.nodeName;
-        mgmtAdjustment.currentValue = nodeInfo.currentValue;
-        // 重新计算推荐值（优化6%）
-        mgmtAdjustment.recommendedValue = Math.round(nodeInfo.currentValue * 0.94);
-        mgmtAdjustment.changePercent = -6;
-        mgmtAdjustment.dataBasis = `基于模型真实当前值${nodeInfo.currentValue}万，目标优化6%`;
-      } else if (dataAnalysis) {
-        mgmtAdjustment.nodeId = nodeInfo.nodeId;
-        mgmtAdjustment.nodeName = nodeInfo.nodeName;
-      }
-      additional.push(mgmtAdjustment);
-      console.log('智能推导：已添加管理费用调整', mgmtAdjustment);
-    }
-  }
-
-  // 如果调整的是收入类，且检测到成本类，添加成本调整
-  const hasCost = detectedFactors.some(f => f.type === 'cost');
-  if (isRevenueAdjustment && hasCost) {
-    console.log('智能推导：准备添加成本调整');
-    const costAdjustment = deriveCostAdjustment(existingAdjustment);
-    if (costAdjustment) {
-      // 从模型数据中匹配正确的nodeId和currentValue
-      const nodeInfo = findNodeRealValue(dataAnalysis, ['营业成本', '生产成本', '制造费用', '成本'], 725);
-      if (nodeInfo.found) {
-        costAdjustment.nodeId = nodeInfo.nodeId;
-        costAdjustment.nodeName = nodeInfo.nodeName;
-        const realCurrentValue = nodeInfo.currentValue;
-        costAdjustment.currentValue = realCurrentValue;
-        // 成本与收入同比例变化（收入增长的80%）
-        const revenueChangePercent = (existingAdjustment.recommendedValue - existingAdjustment.currentValue) / existingAdjustment.currentValue;
-        costAdjustment.recommendedValue = Math.round(realCurrentValue * (1 + revenueChangePercent * 0.8));
-        costAdjustment.changePercent = Math.round((costAdjustment.recommendedValue - realCurrentValue) / realCurrentValue * 100 * 100) / 100;
-        costAdjustment.dataBasis = `基于模型真实当前值${realCurrentValue}万，成本与收入同比例增长${Math.round(revenueChangePercent * 0.8 * 100)}%`;
-      } else if (dataAnalysis) {
-        costAdjustment.nodeId = nodeInfo.nodeId;
-        costAdjustment.nodeName = nodeInfo.nodeName;
-      }
-      additional.push(costAdjustment);
-      console.log('智能推导：已添加成本调整', costAdjustment);
-    }
-  }
-
-  // 如果检测到研发类因子，添加研发调整
-  const hasRD = detectedFactors.some(f => f.type === 'rd');
-  if (hasRD) {
-    console.log('智能推导：准备添加研发调整');
-    const rdAdjustment = deriveRDAdjustment(existingAdjustment);
-    if (rdAdjustment) {
-      // 从模型数据中匹配正确的nodeId和currentValue
-      const nodeInfo = findNodeRealValue(dataAnalysis, ['研发费用', '研发支出', '研发投入'], 70);
-      if (nodeInfo.found) {
-        rdAdjustment.nodeId = nodeInfo.nodeId;
-        rdAdjustment.nodeName = nodeInfo.nodeName;
-        rdAdjustment.currentValue = nodeInfo.currentValue;
-        // 重新计算推荐值（增加10%）
-        rdAdjustment.recommendedValue = Math.round(nodeInfo.currentValue * 1.10);
-        rdAdjustment.changePercent = 10;
-        rdAdjustment.dataBasis = `基于模型真实当前值${nodeInfo.currentValue}万，研发需求增加10%`;
-      } else if (dataAnalysis) {
-        rdAdjustment.nodeId = nodeInfo.nodeId;
-        rdAdjustment.nodeName = nodeInfo.nodeName;
-      }
-      additional.push(rdAdjustment);
-      console.log('智能推导：已添加研发调整', rdAdjustment);
-    }
-  }
-
-  return additional;
-};
-
-/**
- * 从模型数据中查找匹配的nodeId
- * @param {Object} dataAnalysis - 数据分析结果
- * @param {Array} possibleNames - 可能的节点名称
- * @returns {string|null} 匹配的nodeId
- */
-const findMatchingNodeId = (dataAnalysis, possibleNames) => {
-  // 尝试从dataAnalysis或其他地方获取模型信息
-  // 如果无法匹配，返回null，让调用者使用默认ID
-  if (!dataAnalysis) return null;
-
-  // 尝试匹配（简化版本）
-  if (dataAnalysis.nodes) {
-    for (const [nodeId, node] of Object.entries(dataAnalysis.nodes)) {
-      if (possibleNames.some(name => node.name?.includes(name))) {
-        return nodeId;
-      }
-    }
-  }
-
-  return null;
-};
-
-/**
- * 从模型数据中查找节点的真实当前值
- * @param {Object} dataAnalysis - 数据分析结果，包含nodes
- * @param {Array} possibleNames - 可能的节点名称
- * @param {number} defaultValue - 默认值
- * @returns {Object} {nodeId, nodeName, currentValue, found}
- */
-const findNodeRealValue = (dataAnalysis, possibleNames, defaultValue = 0) => {
-  if (!dataAnalysis?.nodes) {
-    return { nodeId: null, nodeName: possibleNames[0], currentValue: defaultValue, found: false };
-  }
-
-  for (const [nodeId, node] of Object.entries(dataAnalysis.nodes)) {
-    if (possibleNames.some(name =>
-      node.name?.includes(name) ||
-      name.includes(node.name) ||
-      nodeId.toLowerCase().includes(name.toLowerCase().replace(/\s+/g, '_'))
-    )) {
-      const currentValue = node.value ?? node.baseline ?? node.currentValue ?? defaultValue;
-      return {
-        nodeId,
-        nodeName: node.name || possibleNames[0],
-        currentValue: Math.round(currentValue * 100) / 100,
-        found: true,
-        node
-      };
-    }
-  }
-
-  return { nodeId: null, nodeName: possibleNames[0], currentValue: defaultValue, found: false };
-};
-
-/**
- * 推导营销费用调整
- * 注意：currentValue和recommendedValue由调用者根据真实模型数据填充
- */
-const deriveMarketingAdjustment = (revenueAdjustment) => {
-  return {
-    nodeId: 'sales_expense',
-    nodeName: '销售费用',
-    currentValue: 0, // 将由调用者填充真实值
-    recommendedValue: 0, // 将由调用者计算
-    changePercent: 12,
-    changeReason: '支撑收入增长目标，加大市场推广投入',
-    dataBasis: '基于收入增长目标，适度增加营销费用',
-    businessReason: '配合营业收入增长，增加广告投放和渠道推广',
-    riskWarning: '需监控转化率，确保ROI合理',
-    monthlyStrategy: '重点月份投入（11-12月旺季）',
-    monthlyFactors: [0.7, 0.7, 0.75, 0.8, 0.8, 0.85, 0.9, 0.95, 1.0, 1.3, 1.5, 1.6],
-    confidence: 0.75,
-    derived: true // 标记为推导生成
-  };
-};
-
-/**
- * 推导管理费用调整
- * 注意：currentValue和recommendedValue由调用者根据真实模型数据填充
- */
-const deriveManagementAdjustment = (revenueAdjustment) => {
-  return {
-    nodeId: 'mgmt_expense',
-    nodeName: '管理费用',
-    currentValue: 0, // 将由调用者填充真实值
-    recommendedValue: 0, // 将由调用者计算
-    changePercent: -6,
-    changeReason: '数字化工具上线，流程优化见效',
-    dataBasis: '基于业务背景中的"优化管理"要求，目标降低5-10%',
-    businessReason: '提升运营效率，通过流程改进降低成本',
-    riskWarning: '需避免过度压缩影响员工积极性',
-    monthlyStrategy: '平均分配，保持稳定',
-    monthlyFactors: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-    confidence: 0.7,
-    derived: true
-  };
-};
-
-/**
- * 推导营业成本调整
- * 注意：currentValue和recommendedValue由调用者根据真实模型数据填充
- */
-const deriveCostAdjustment = (revenueAdjustment) => {
-  return {
-    nodeId: 'operating_cost',
-    nodeName: '营业成本',
-    currentValue: 0, // 将由调用者填充真实值
-    recommendedValue: 0, // 将由调用者计算
-    changePercent: 0, // 将由调用者计算
-    changeReason: '与营业收入挂钩，保持毛利率稳定',
-    dataBasis: '基于真实当前值，成本与收入同比例增长',
-    businessReason: '维持稳定的盈利能力，支撑利润目标',
-    riskWarning: '需监控原材料成本波动',
-    monthlyStrategy: '与收入同步增长',
-    monthlyFactors: [0.85, 0.85, 0.9, 0.95, 0.95, 1.0, 1.05, 1.1, 1.15, 1.25, 1.35, 1.4],
-    confidence: 0.8,
-    derived: true
-  };
-};
-
-/**
- * 推导研发支出调整
- * 注意：currentValue和recommendedValue由调用者根据真实模型数据填充
- */
-const deriveRDAdjustment = (revenueAdjustment) => {
-  return {
-    nodeId: 'rd_expense',
-    nodeName: '研发费用',
-    currentValue: 0, // 将由调用者填充真实值
-    recommendedValue: 0, // 将由调用者计算
-    changePercent: 10,
-    changeReason: '加大研发投入，提升产品竞争力',
-    dataBasis: '基于业务背景中的研发需求，适度增加投入10%',
-    businessReason: '支持长期发展，增强技术壁垒',
-    riskWarning: '需关注投入产出比',
-    monthlyStrategy: '按项目进度分配',
-    monthlyFactors: [1.0, 1.0, 1.1, 1.1, 1.1, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-    confidence: 0.7,
-    derived: true
-  };
-};

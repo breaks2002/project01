@@ -588,16 +588,22 @@ export const extractConstraintFromText = (text, nodes) => {
  * @param {Object} nodes - 所有节点
  * @returns {Object} 完整的解析结果
  */
-export const parseTuningRequest = (goalText, constraintTexts, nodes) => {
+export const parseTuningRequest = (goalText, knowledgeResults, nodes) => {
   // 使用新的业务上下文提取
   const businessContext = extractBusinessContext(goalText, nodes);
 
   // 保持向后兼容
   const goal = extractGoalFromText(goalText, nodes);
 
-  const constraints = (constraintTexts || [])
-    .filter(c => c.trim())
-    .map(c => extractConstraintFromText(c, nodes));
+  const constraints = (knowledgeResults || [])
+    .filter(k => k.title || k.scenario)
+    .map(k => ({
+      parsed: true,
+      nodeId: k.nodeId || null,
+      nodeName: k.nodeId ? nodes[k.nodeId]?.name : k.title,
+      type: 'knowledge_base',
+      raw: `知识库案例：${k.title || k.scenario} (相似度${(k.similarity * 100).toFixed(0)}%)`
+    }));
 
   const validation = {
     hasGoal: !!goal.targetNodeId || !!goal.targetNodeName || businessContext.goals.length > 0,

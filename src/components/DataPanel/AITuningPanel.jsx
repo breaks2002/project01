@@ -1,19 +1,55 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import useVDTStore from '../../store/useVDTStore';
 import { callAI } from '../../services/aiService';
-import { buildSmartTuningPrompt, buildTuningPrompt, parseAIResponse } from '../../utils/aiPromptBuilder';
-import { extractBusinessContext, parseTuningRequest, isNaturalTuningMode } from '../../utils/nlUnderstanding';
+import { buildSmartTuningPrompt, parseAIResponse } from '../../utils/aiPromptBuilder';
+import { extractBusinessContext } from '../../utils/nlUnderstanding';
 import { parseDocument, extractKeyInformation, isSupportedFileType } from '../../utils/DocumentParser';
+import knowledgeService from '../../services/knowledgeService';
+import { fallbackStrategyEngine } from '../../engine/FallbackStrategyEngine';
+import { consistencyValidationEngine } from '../../engine/ConsistencyValidationEngine';
+import { executeUnionDecision, convertToAIFORMat } from '../../engine/UnionDecisionEngine';
+import { formatValue } from '../../utils/formatters';
+import NodeSelector from './NodeSelector';
+import { TEST_VERSION } from '../../test-version';
+
+// ===== 调试日志：验证代码加载 =====
+console.log('[AITuningPanel] 模块加载成功！DEBUG-20260317-NEW'); console.warn('⚠️️⚠️ DEBUG LOG - 如果看到这个说明代码已加载 ⚠️️⚠️！时间:', new Date().toLocaleTimeString());
+console.log('🔧 [AITuningPanel] TEST_VERSION:', TEST_VERSION);
 
 /**
  * 智能调参面板 - 全新设计
  * 支持自然语言业务背景输入、数据洞察、智能建议
  */
-const AITuningPanel = ({ onClose, onBringToFront }) => {
+const AITuningPanel = ({ onClose, onBringToFront, selectedScenarios = [] }) => {
+  console.log('🔥 [AITuningPanel] 组件被渲染！时间:', new Date().toLocaleTimeString());
+  console.log('🔥 [AITuningPanel] selectedScenarios:', selectedScenarios);
+
   const nodes = useVDTStore((s) => s.nodes);
   const aiConfig = useVDTStore((s) => s.aiConfig);
   const updateNode = useVDTStore((s) => s.updateNode);
   const saveScenario = useVDTStore((s) => s.saveScenario);
+
+  // 检查模型是否已加载
+  const hasModel = useMemo(() => {
+    const nodeCount = Object.keys(nodes).length;
+    if (nodeCount === 0) {
+      console.warn('[AITuningPanel] 模型未加载，无法执行 AI 调参');
+      return false;
+    }
+
+    // 检查是否有计算指标（用于公式计算）
+    const computedNodes = Object.values(nodes).filter(n => n.type === 'computed');
+    const driverNodes = Object.values(nodes).filter(n => n.type === 'driver');
+
+    console.log('[AITuningPanel] 模型检查:', {
+      totalNodes: nodeCount,
+      driverNodes: driverNodes.length,
+      computedNodes: computedNodes.length,
+      hasModel: true
+    });
+
+    return nodeCount > 0;
+  }, [nodes]);
 
   // ===== 状态定义 =====
 
@@ -31,11 +67,134 @@ const AITuningPanel = ({ onClose, onBringToFront }) => {
   const [isLoading, setIsLoading] = useState(false);
   const [aiResult, setAiResult] = useState(null);
   const [editableAdjustments, setEditableAdjustments] = useState([]);
+  const [validationResult, setValidationResult] = useState(null); // 目标验证结果（单独存储，不显示在调整列表中）
   const [isEditingMode, setIsEditingMode] = useState(false);
   const [showAddFactorModal, setShowAddFactorModal] = useState(false);
   const [error, setError] = useState(null);
   const [showSavePrompt, setShowSavePrompt] = useState(false);
   const [appliedCount, setAppliedCount] = useState(0);
+
+  // 节点选择状态
+  const [nodeSelectorMode, setNodeSelectorMode] = useState('auto');
+  const [selectedMetrics, setSelectedMetrics] = useState([]);
+  const [selectedDrivers, setSelectedDrivers] = useState([]);
+  const [conflictWarnings, setConflictWarnings] = useState([]);
+
+  // 冲突检测：当业务背景或选择变化时，检测冲突
+  useEffect(() => {
+    if (nodeSelectorMode !== 'manual' || !businessContext) {
+      setConflictWarnings([]);
+      return;
+    }
+
+    const warnings = [];
+
+    // 从业务背景中提取提到的因子
+    const mentionedFactors = [];
+    const driverNodes = Object.values(nodes).filter(n => n.type === 'driver');
+
+    driverNodes.forEach(node => {
+      if (businessContext.includes(node.name)) {
+        mentionedFactors.push({ id: node.id, name: node.name });
+      }
+    });
+
+    // 检查是否有提到的因子不在选择范围内
+    const unselectedFactors = mentionedFactors.filter(
+      f => !selectedDrivers.includes(f.id)
+    );
+
+    if (unselectedFactors.length > 0) {
+      warnings.push({
+        type: 'factor_conflict',
+        message: `业务背景中提到了"${unselectedFactors.map(f => f.name).join('、')}"，但您未选择这些因子作为可调整范围。是否添加？`,
+        confirmText: '添加选中的因子',
+        onConfirm: () => {
+          const newDrivers = [...new Set([...selectedDrivers, ...unselectedFactors.map(f => f.id)])];
+          setSelectedDrivers(newDrivers);
+          setConflictWarnings([]);
+        }
+      });
+    }
+
+    setConflictWarnings(warnings);
+  }, [businessContext, selectedDrivers, nodeSelectorMode, nodes]);
+
+  // 知识库选中状态
+  const [selectedKnowledgeEntries, setSelectedKnowledgeEntries] = useState([]);
+  const [restoredScenarios, setRestoredScenarios] = useState([]); // 从 localStorage 恢复的场景
+
+  // 读取 localStorage 中的知识库选中状态
+  const loadSelectedKnowledge = useCallback(() => {
+    const savedIds = JSON.parse(localStorage.getItem('vdt_knowledge_selected_ids') || '[]');
+    if (savedIds.length > 0) {
+      knowledgeService.initialize().then(() => {
+        const allEntries = knowledgeService.getAllEntries();
+        const selected = allEntries.filter(e => savedIds.includes(e.id));
+        setSelectedKnowledgeEntries(selected);
+      });
+    } else {
+      setSelectedKnowledgeEntries([]);
+    }
+  }, []);
+
+  // 读取 localStorage 中的场景选中状态
+  const loadSelectedScenarios = useCallback(async () => {
+    try {
+      const savedIds = JSON.parse(localStorage.getItem('vdt_prompt_selected_template') || '[]');
+      console.log('[AITuningPanel] localStorage 中的场景 ID:', savedIds);
+      if (savedIds.length > 0) {
+        const { default: promptTemplateService } = await import('../../services/promptTemplateService');
+        await promptTemplateService.initialize();
+        const allTemplates = promptTemplateService.getAllTemplates();
+        console.log('[AITuningPanel] 所有场景模板:', allTemplates.map(t => ({ id: t.id, name: t.name, hasSystemPrompt: !!t.systemPrompt })));
+        const selected = allTemplates.filter(t => savedIds.includes(t.id));
+        console.log('[AITuningPanel] 恢复的场景:', selected.map(t => ({ id: t.id, name: t.name, hasSystemPrompt: !!t.systemPrompt })));
+        setRestoredScenarios(selected);
+      } else {
+        console.log('[AITuningPanel] localStorage 中没有选中的场景，清空场景列表');
+        // ⚠️ 重要：必须清空场景列表，否则界面会显示已选
+        setRestoredScenarios([]);
+      }
+    } catch (err) {
+      console.error('[AITuningPanel] 恢复场景失败:', err);
+      setRestoredScenarios([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadSelectedKnowledge();
+    loadSelectedScenarios();
+
+    // 监听 storage 变化，当知识库/场景选择变化时自动刷新
+    const handleStorageChange = (e) => {
+      if (e.key === 'vdt_knowledge_selected_ids') {
+        console.log('[AITuningPanel] 检测到知识库选择变化');
+        loadSelectedKnowledge();
+      }
+      if (e.key === 'vdt_prompt_selected_template') {
+        console.log('[AITuningPanel] 检测到场景选择变化');
+        loadSelectedScenarios();
+      }
+    };
+
+    // 也监听自定义事件（当同页面内修改时）
+    const handleKnowledgeChange = () => loadSelectedKnowledge();
+    const handleScenarioChange = () => loadSelectedScenarios();
+
+    window.addEventListener('storage', handleStorageChange);
+    window.addEventListener('knowledge-selection-changed', handleKnowledgeChange);
+    window.addEventListener('scenario-selection-changed', handleScenarioChange);
+
+    return () => {
+      window.removeEventListener('storage', handleStorageChange);
+      window.removeEventListener('knowledge-selection-changed', handleKnowledgeChange);
+      window.removeEventListener('scenario-selection-changed', handleScenarioChange);
+    };
+  }, []);
+
+  // 使用选中的场景（优先使用恢复的，其次使用 props 传入的）
+  const activeScenarios = restoredScenarios.length > 0 ? restoredScenarios : selectedScenarios;
 
   // UI状态
   const [expandedSections, setExpandedSections] = useState({
@@ -43,7 +202,8 @@ const AITuningPanel = ({ onClose, onBringToFront }) => {
     dataAnalysis: true,
     adjustments: false,
     impact: true,
-    explanation: false
+    explanation: false,
+    validation: true // 目标验证默认展开
   });
   const containerRef = useRef(null);
 
@@ -130,69 +290,437 @@ const AITuningPanel = ({ onClose, onBringToFront }) => {
 
   // ===== AI智能调参 =====
 
-  // 验证目标达成情况
-  const validateTargetAchievement = (adjustments, context) => {
+  // 验证目标达成情况（基于模型公式计算）
+  const validateTargetAchievement = (adjustments, context, aiResult = null) => {
     if (!adjustments || adjustments.length === 0) return;
 
-    // 1. 从业务背景中提取目标
-    const contextLower = context.toLowerCase();
+        // 1. 从业务背景中提取目标指标和目标值（动态识别 + 兜底）
+    // 首先从模型中提取所有计算指标名称，用于动态匹配
+    const metricNames = computedNodes.map(n => n.name).filter(Boolean);
+    const uniqueMetricNames = [...new Set(metricNames)];
 
-    // 提取净利润目标（如"净利润达到350万"）
-    const profitMatch = context.match(/净利润.*?达到|目标.*?([\d.]+)\s*万/);
-    const targetProfit = profitMatch ? parseFloat(profitMatch[1]) : null;
+    // 构建动态正则表达式（基于模型中的实际指标名称）
+    const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\\\$&');
+    const metricPattern = uniqueMetricNames.length > 0
+      ? '(' + uniqueMetricNames.map(escapeRegex).join('|') + ')'
+      : '(净利润 | 营业利润 | 利润总额 | 毛利 | 净利 | 利润 | 收入 | 成本 | 费用)'; // 兜底模式
 
-    // 2. 获取调整后的值
-    const revenue = adjustments.find(a => a.nodeName?.includes('收入'))?.recommendedValue;
-    const cost = adjustments.find(a => a.nodeName?.includes('成本'))?.recommendedValue;
-    const salesExpense = adjustments.find(a => a.nodeName?.includes('销售费用'))?.recommendedValue;
-    const mgmtExpense = adjustments.find(a => a.nodeName?.includes('管理费用'))?.recommendedValue;
+    const targetPatterns = [
+      // 模式 1: 指标名 + 达到 + 数字 + 万（允许左右/以上/以下等后缀）
+      new RegExp(metricPattern + '.*?达到.*?([\\d.]+)\\s*万', 'i'),
+      // 模式 2: 指标名 + 目标 + 数字 + 万
+      new RegExp(metricPattern + '.*?目标.*?([\\d.]+)\\s*万', 'i'),
+      // 模式 3: 目标 + 指标名 + 数字 + 万
+      new RegExp('目标.*?' + metricPattern + '.*?([\\d.]+)\\s*万', 'i'),
+      // 模式 4: 实现 + 指标名 + 数字 + 万
+      new RegExp('实现.*?' + metricPattern + '.*?([\\d.]+)\\s*万', 'i'),
+      // 模式 5: 数字 + 万 + 指标名（如"达到 350 万净利润"）
+      new RegExp('([\\d.]+)\\s*万.*?' + metricPattern, 'i'),
+      // 模式 6: 指标名 + 达到 + 数字（不要求万字，允许"350 左右"）
+      new RegExp(metricPattern + '.*?达到.*?([\\d.]+)', 'i'),
+      // 模式 7: 指标名 + 目标 + 数字
+      new RegExp(metricPattern + '.*?目标.*?([\\d.]+)', 'i'),
+    ];
 
-    console.log('目标验证: 收入', revenue, '成本', cost, '销售费用', salesExpense, '管理费用', mgmtExpense);
+    let targetMetricName = null;
+    let targetValue = null;
 
-    // 3. 计算预期净利润（简化计算）
-    if (revenue && cost && salesExpense && mgmtExpense) {
-      const expectedProfit = revenue - cost - salesExpense - mgmtExpense;
-      console.log('目标验证: 预期净利润', expectedProfit, '目标', targetProfit);
-
-      // 4. 对比目标
-      if (targetProfit) {
-        const gap = expectedProfit - targetProfit;
-        const status = gap >= 0 ? '达标' : '未达标';
-        const gapText = gap >= 0 ? `超出${Math.round(gap)}万` : `差距${Math.round(Math.abs(gap))}万`;
-
-        console.log(`目标验证结果: ${status}，${gapText}`);
-
-        // 将验证结果添加到 adjustments 中显示
-        const validationResult = {
-          _id: `validation_${Date.now()}`,
-          nodeName: '📊 目标验证',
-          currentValue: expectedProfit,
-          recommendedValue: targetProfit,
-          changePercent: 0,
-          changeReason: `预期净利润${Math.round(expectedProfit)}万，目标${targetProfit}万，${gapText}`,
-          dataBasis: '基于调整方案联动计算',
-          businessReason: `收入${revenue} - 成本${cost} - 费用${salesExpense + mgmtExpense} = 净利润${Math.round(expectedProfit)}`,
-          riskWarning: gap < 0 ? `⚠️ 当前方案无法达成目标，建议调整` : '✅ 方案可达成目标',
-          monthlyStrategy: '验证结果',
-          monthlyFactors: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
-          confidence: 0.9,
-          isValidation: true
-        };
-
-        // 添加到 adjustments 开头
-        setEditableAdjustments(prev => [validationResult, ...prev]);
+    for (const pattern of targetPatterns) {
+      const match = context.match(pattern);
+      if (match) {
+        const source = pattern.source;
+        // 模式 5: 数字在前（如"350 万净利润"）
+        if (source.includes('([\\\\d.]+)\\\\s\\\\*万') || source.match(/\[\\d\.\]\+.*\\.\*\\?.*\$\)/)) {
+          targetValue = parseFloat(match[1]);
+          targetMetricName = match[2];
+        }
+        // 模式 6-7: 指标名 + 达到/目标 + 数字（允许"左右"等后缀）
+        else if (source.includes('.*?达到.*?([\\\\d.]+)') || source.includes('.*?目标.*?([\\\\d.]+)')) {
+          targetMetricName = match[1];
+          targetValue = parseFloat(match[2]);
+        }
+        // 模式 1-4: 标准格式（数字后面有万字）
+        else {
+          targetMetricName = match[1];
+          targetValue = parseFloat(match[2]);
+        }
+        console.log('目标验证：模式匹配成功，使用模式:', source.substring(0, 50));
+        break;
       }
     }
+
+    // 如果还是没有找到，尝试从 AI 返回的 explanation 中提取
+    if (!targetValue && aiResult && aiResult.explanation) {
+      // 使用动态指标名称构建正则
+      const expMetricPattern = uniqueMetricNames.length > 0
+        ? '(' + uniqueMetricNames.join('|') + ')'
+        : '(?:净利润 | 营业利润 | 利润总额 | 毛利)';
+
+      const explanationPatterns = [
+        new RegExp(expMetricPattern + '.*?([\\d.]+)\\s*万', 'i'),
+        new RegExp('目标.*?([\\d.]+)\\s*万', 'i'),
+      ];
+      for (const expPattern of explanationPatterns) {
+        const expMatch = aiResult.explanation.match(expPattern);
+        if (expMatch) {
+          targetValue = parseFloat(expMatch[1]);
+          // 尝试从 explanation 中提取指标名
+          const metricNameRegex = new RegExp(expMetricPattern, 'i');
+          const metricMatch = aiResult.explanation.match(metricNameRegex);
+          if (metricMatch) {
+            targetMetricName = metricMatch[1];
+          }
+          console.log('目标验证：从 AI explanation 中提取到目标值', targetValue, '指标', targetMetricName);
+          break;
+        }
+      }
+    }
+
+    // 如果还是没有找到，尝试从业务背景的纯数字中提取（兜底）
+    if (!targetValue) {
+      const defaultMatch = context.match(/目标.*?([\d.]+)\s*万/i);
+      if (defaultMatch) {
+        targetValue = parseFloat(defaultMatch[1]);
+        console.log('目标验证：从默认模式中提取到目标值', targetValue);
+        // 尝试从上下文中提取指标名（使用动态指标名称）
+        const metricNameRegex = new RegExp(uniqueMetricNames.join('|'), 'i');
+        const metricMatch = context.match(metricNameRegex);
+        if (metricMatch) {
+          targetMetricName = metricMatch[1];
+          console.log('目标验证：从上下文中提取到指标名', targetMetricName);
+        }
+      }
+    }
+
+    // 如果还是没有找到，从模型中查找有目标值的计算指标
+    if (!targetValue) {
+      const metricWithTarget = computedNodes.find(n => n.targetValue !== null && n.targetValue !== undefined);
+      if (metricWithTarget) {
+        targetValue = metricWithTarget.targetValue;
+        targetMetricName = metricWithTarget.name;
+        console.log('目标验证：从模型目标值中获取', targetMetricName, '=', targetValue);
+      }
+    }
+
+    if (!targetValue) {
+      console.log('目标验证：未找到明确的目标值，无法验证');
+      return;
+    }
+
+    console.log('目标验证：识别到目标', targetMetricName, '→', targetValue, '万');
+
+    // 2. 在模型中查找对应的计算指标
+    const targetNode = targetMetricName ? computedNodes.find(node =>
+      node.name === targetMetricName ||
+      node.name?.includes(targetMetricName) ||
+      (targetMetricName && node.name && targetMetricName.includes(node.name))
+    ) : null;
+
+    if (!targetNode) {
+      console.log('目标验证：模型中未找到指标"', targetMetricName, '"');
+    }
+
+    // 3. 使用 calculateAdjustedMetrics 计算所有计算指标的值
+    console.log('目标验证：调用 calculateAdjustedMetrics 计算调整后的指标值...');
+    const adjustedMetrics = calculateAdjustedMetrics(adjustments, nodes);
+
+    // 4. 计算预期值（优先使用模型公式）
+    let expectedValue = null;
+    let calculationLogic = '';
+
+    if (targetNode && targetNode.formula) {
+      console.log('目标验证：使用模型公式计算', targetNode.name);
+
+      // 首先尝试使用已计算的调整值
+      if (adjustedMetrics[targetNode.id] !== undefined) {
+        expectedValue = adjustedMetrics[targetNode.id];
+        calculationLogic = targetNode.formula + ' = ' + Math.round(expectedValue);
+        console.log('目标验证：使用 calculateAdjustedMetrics 计算结果', targetNode.name, '=', expectedValue);
+      }
+
+      // 如果失败，尝试直接计算公式
+      if (expectedValue === null || isNaN(expectedValue)) {
+        console.log('目标验证：直接计算目标节点公式...');
+
+        // 提取公式中的依赖（支持中文和英文 ID）
+        const formulaDeps = targetNode.formula.match(/[a-zA-Z_][a-zA-Z0-9_]*|[\u4e00-\u9fa5]+[a-zA-Z0-9_]*/g) || [];
+        console.log('  提取到的依赖:', formulaDeps);
+
+        // 构建替换映射
+        const replaceMap = {};
+        formulaDeps.forEach(depCode => {
+          // 跳过纯数字
+          if (/^[\d.]+$/.test(depCode)) return;
+
+          const depNode = nodes[depCode];
+          if (depNode) {
+            // 优先使用计算后的值
+            const value = adjustedMetrics[depNode.id] ?? depNode.value ?? 0;
+            replaceMap[depCode] = value;
+            console.log('  依赖:', depNode.name, '=', value);
+          } else {
+            console.log('  未找到依赖节点:', depCode);
+          }
+        });
+
+        console.log('  替换映射:', replaceMap);
+
+        // 替换公式中的变量为数值（按长度降序排序）
+        let calcExpression = targetNode.formula;
+        const sortedKeys = Object.keys(replaceMap).sort((a, b) => b.length - a.length);
+        sortedKeys.forEach(key => {
+          const value = replaceMap[key];
+          const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const regex = new RegExp(escapedKey, 'g');
+          calcExpression = calcExpression.replace(regex, value);
+          console.log('  替换:', key, '→', value);
+        });
+
+        console.log('  替换后的表达式:', calcExpression);
+
+        // 清理表达式（移除空格）
+        const sanitized = calcExpression.replace(/\s+/g, '');
+
+        try {
+          expectedValue = Function('"use strict";return (' + sanitized + ')')();
+          calculationLogic = targetNode.formula + ' = ' + Math.round(expectedValue);
+          console.log('目标验证：公式计算结果', expectedValue);
+        } catch (e) {
+          console.log('目标验证：公式计算失败', e.message);
+        }
+      }
+    }
+
+    // 5. 如果公式计算失败，使用兜底逻辑（基于模型中的一级指标）
+    if (expectedValue === null || isNaN(expectedValue)) {
+      console.log('目标验证：使用兜底逻辑');
+
+      // 兜底逻辑：从模型中查找与目标指标名称最相似的计算指标
+      const similarMetric = computedNodes.find(n =>
+        n.name && targetMetricName &&
+        (n.name.includes(targetMetricName) || targetMetricName.includes(n.name))
+      );
+
+      if (similarMetric) {
+        expectedValue = similarMetric.value ?? 0;
+        calculationLogic = '使用模型中"' + similarMetric.name + '"的当前值';
+        console.log('目标验证：使用模型指标值', similarMetric.name, '=', expectedValue);
+      } else {
+        // 如果找不到，使用第一个计算指标的值
+        const firstMetric = computedNodes.find(n => n.type === 'computed' && n.value !== null);
+        if (firstMetric) {
+          expectedValue = firstMetric.value ?? 0;
+          calculationLogic = '使用模型中"' + firstMetric.name + '"的当前值（兜底）';
+          console.log('目标验证：使用第一个计算指标', firstMetric.name, '=', expectedValue);
+        } else {
+          console.log('目标验证：兜底计算也失败，没有可用的指标数据');
+          return;
+        }
+      }
+
+      if (expectedValue === null || isNaN(expectedValue)) {
+        console.log('目标验证：兜底计算也失败');
+        return;
+      }
+    }
+
+    // 6. 对比目标
+    const gap = expectedValue - targetValue;
+    const status = gap >= 0 ? '达标' : '未达标';
+
+    // 7. 获取目标节点的格式设置
+    const targetNodeFormat = targetNode?.format || '';
+    const targetNodeUnit = targetNode?.unit || '万';
+    const formattedExpected = formatValue(expectedValue, targetNodeFormat, targetNodeUnit);
+    const formattedTarget = formatValue(targetValue, targetNodeFormat, targetNodeUnit);
+    const formattedGap = formatValue(Math.abs(gap), targetNodeFormat, targetNodeUnit);
+
+    // 8. 构建验证结果
+    const validationResult = {
+      _id: 'validation_' + Date.now(),
+      nodeName: '📊 目标验证',
+      metricName: targetMetricName,
+      currentValue: expectedValue,
+      recommendedValue: targetValue,
+      changePercent: 0,
+      formattedValue: formattedExpected,
+      formattedTarget: formattedTarget,
+      formattedGap: formattedGap,
+      gap: gap,
+      unit: targetNodeUnit,
+      changeReason: '预期' + targetMetricName + formattedExpected + '，目标' + formattedTarget + '，' + (gap >= 0 ? '超出' : '差距') + formattedGap,
+      dataBasis: calculationLogic,
+      businessReason: calculationLogic,
+      riskWarning: gap < 0 ? '⚠️ 当前方案无法达成' + targetMetricName + '目标，建议调整' : '✅ 方案可达成' + targetMetricName + '目标',
+      monthlyStrategy: '验证结果',
+      monthlyFactors: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+      confidence: 0.9,
+      isValidation: true
+    };
+
+    setValidationResult(validationResult);
+  };
+
+
+  /**
+   * 根据 AI 调整后的驱动因子值，计算所有计算指标的预期值
+   * @param {Array} adjustments - AI 调整建议
+   * @param {Object} nodes - 所有节点
+   * @returns {Object} 计算后的指标值映射
+   */
+  const calculateAdjustedMetrics = (adjustments, nodes) => {
+    console.log('[calculateAdjustedMetrics] 开始计算调整后的指标值...');
+
+    // 1. 构建调整后的驱动因子值映射
+    const adjustedDriversMap = {};
+    adjustments.forEach(adj => {
+      let nodeId = adj.nodeId;
+
+      // 如果没有 nodeId，尝试从 nodeName 查找
+      if (!nodeId && adj.nodeName) {
+        const foundNode = Object.values(nodes).find(n =>
+          n.name === adj.nodeName || n.name?.includes(adj.nodeName) || adj.nodeName?.includes(n.name)
+        );
+        if (foundNode) {
+          nodeId = foundNode.id;
+          console.log('[calculateAdjustedMetrics] 从 nodeName 找到 nodeId:', adj.nodeName, '→', nodeId);
+        }
+      }
+
+      if (nodeId) {
+        const node = nodes[nodeId];
+        if (node && node.type === 'driver') {
+          adjustedDriversMap[nodeId] = adj.recommendedValue;
+          console.log('[calculateAdjustedMetrics] 驱动因子调整:', node.name, '=', adj.recommendedValue);
+        } else if (node && node.type === 'computed') {
+          // 如果是计算指标，直接存入 computedValues（但这里只处理 driver）
+          console.log('[calculateAdjustedMetrics] 跳过计算指标（将在递归中计算）:', node.name);
+        } else {
+          console.log('[calculateAdjustedMetrics] 未找到节点或类型不匹配:', nodeId, node?.type);
+        }
+      } else {
+        console.warn('[calculateAdjustedMetrics] 无法识别的调整项:', adj);
+      }
+    });
+
+    // 2. 递归计算所有计算指标的值
+    const computedValues = {};
+    const visited = new Set();
+
+    const calculateMetric = (nodeId, depth = 0) => {
+      if (visited.has(nodeId)) return computedValues[nodeId];
+      visited.add(nodeId);
+
+      const node = nodes[nodeId];
+      if (!node || !node.formula) {
+        console.log('[calculateAdjustedMetrics] 跳过（无公式）:', nodeId);
+        return null;
+      }
+
+      console.log('[calculateAdjustedMetrics] 计算:', node.name, '公式:', node.formula);
+
+      // 提取公式中的依赖（支持中文和英文 ID）
+      // 匹配：英文标识符（如 revenue_01）或 中文标识符（如 营业收入 01）
+      const formulaDeps = node.formula.match(/[a-zA-Z_][a-zA-Z0-9_]*|[\u4e00-\u9fa5]+[a-zA-Z0-9_]*/g) || [];
+
+      console.log('  提取到的依赖:', formulaDeps);
+
+      // 构建替换映射并计算
+      const replaceMap = {};
+      formulaDeps.forEach(depCode => {
+        // 跳过纯数字或运算符
+        if (/^[\d.]+$/.test(depCode)) return;
+
+        const depNode = nodes[depCode];
+        if (depNode) {
+          // 优先使用调整后的值，其次使用已计算的子节点值，最后使用原始值
+          if (depNode.type === 'driver') {
+            replaceMap[depCode] = adjustedDriversMap[depNode.id] ?? depNode.value ?? 0;
+            console.log('  驱动因子:', depNode.name, '=', replaceMap[depCode], '(from adjustedDriversMap)');
+          } else if (depNode.type === 'computed') {
+            // 递归计算子节点
+            calculateMetric(depNode.id, depth + 1);
+            replaceMap[depCode] = computedValues[depNode.id] ?? depNode.value ?? 0;
+            console.log('  计算指标:', depNode.name, '=', replaceMap[depCode], '(from computedValues)');
+          } else {
+            replaceMap[depCode] = depNode.value ?? 0;
+            console.log('  其他:', depNode.name, '=', replaceMap[depCode]);
+          }
+        } else {
+          console.warn('  未找到依赖节点:', depCode);
+        }
+      });
+
+      console.log('  替换映射:', replaceMap);
+
+      // 替换公式中的变量（按长度降序排序，避免短名称先替换导致长名称匹配失败）
+      let calcExpression = node.formula;
+      const sortedKeys = Object.keys(replaceMap).sort((a, b) => b.length - a.length);
+      sortedKeys.forEach(key => {
+        const value = replaceMap[key];
+        // 使用全局替换，转义特殊字符
+        const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const regex = new RegExp(escapedKey, 'g');
+        calcExpression = calcExpression.replace(regex, value);
+        console.log('  替换:', key, '→', value);
+      });
+
+      console.log('  替换后的表达式:', calcExpression);
+
+      // 清理并计算（移除空格，但保留负号和数字）
+      const sanitized = calcExpression.replace(/\s+/g, '');
+      try {
+        const result = Function('"use strict";return (' + sanitized + ')')();
+        computedValues[nodeId] = result;
+        console.log('  结果:', node.name, '=', result);
+        return result;
+      } catch (e) {
+        console.warn('公式计算失败:', node.name, node.formula, '替换后:', calcExpression, '错误:', e.message);
+        return node.value ?? 0;
+      }
+    };
+
+    // 计算所有计算指标
+    Object.values(nodes).forEach(node => {
+      if (node.type === 'computed' && node.formula) {
+        calculateMetric(node.id);
+      }
+    });
+
+    console.log('[calculateAdjustedMetrics] 计算完成，结果:', computedValues);
+    return computedValues;
   };
 
   const runAITuning = async () => {
+    console.log('🚀 [AITuningPanel] runAITuning 被调用！');
+    console.log('🚀 [AITuningPanel] businessContext:', businessContext);
+    console.log('🚀 [AITuningPanel] activeScenarios:', activeScenarios);
+    console.log('🚀 [AITuningPanel] knowledgeResults will be loaded...');
     if (!aiConfig.url || !aiConfig.model) {
       setError('请先配置AI参数（在设置中配置）');
       return;
     }
 
-    if (!businessContext.trim()) {
+    // 输入验证：检查业务背景是否为空或无意义
+    const trimmedContext = businessContext.trim();
+    if (!trimmedContext) {
       setError('请先描述业务背景和目标');
+      return;
+    }
+
+    // 检查输入是否过短（至少 10 个字符）
+    if (trimmedContext.length < 10) {
+      setError('请输入有效的业务背景描述（至少 10 个字符）');
+      return;
+    }
+
+    // 检查是否是明显的无意义输入（纯数字、纯字母、纯符号）
+    const isOnlyNumbers = /^d+$/.test(trimmedContext);
+    const isOnlyLetters = /^[a-zA-Z]+$/.test(trimmedContext);
+    const isOnlySymbols = /^[^a-zA-Z一-龥d]+$/.test(trimmedContext);
+
+    if (isOnlyNumbers || isOnlyLetters || isOnlySymbols) {
+      setError('请输入有意义的业务背景描述（中文、数字、字母混合）');
       return;
     }
 
@@ -201,28 +729,88 @@ const AITuningPanel = ({ onClose, onBringToFront }) => {
     setAiResult(null);
 
     try {
-      // 判断使用新模式还是传统模式
-      const useSmartMode = isNaturalTuningMode(businessContext);
+      // 步骤 1：使用选中的知识库或检索知识库
+      let knowledgeResults = [];
 
-      let prompt;
-      if (useSmartMode && parsedContext) {
-        // 使用新的智能Prompt
-        prompt = buildSmartTuningPrompt({
-          nodes,
-          businessContext: parsedContext,
-          constraints: parsedContext.constraints
-        });
+      // 从 localStorage 读取选中的知识库条目
+      const savedKnowledgeIds = JSON.parse(localStorage.getItem('vdt_knowledge_selected_ids') || '[]');
+
+      if (savedKnowledgeIds && savedKnowledgeIds.length > 0) {
+        // 使用用户选中的知识库条目
+        console.log('[AI 调参] 使用选中的知识库:', savedKnowledgeIds.length, '条');
+
+        // 初始化 knowledgeService 并获取选中的条目
+        await knowledgeService.initialize();
+        const allEntries = knowledgeService.getAllEntries();
+        const selectedEntries = allEntries.filter(e => savedKnowledgeIds.includes(e.id));
+
+        knowledgeResults = selectedEntries.map(entry => ({
+          id: entry.id,
+          title: entry.title,
+          description: entry.description,
+          industry: entry.industry,
+          scenario: entry.scenario,
+          factors: entry.factors,
+          tags: entry.tags,
+          similarity: 1.0 // 选中的条目相似度设为 100%
+        }));
       } else {
-        // 使用传统Prompt（兼容旧模式）
-        const legacyParsed = parseTuningRequest(businessContext, [], nodes);
-        prompt = buildTuningPrompt({
-          nodes,
-          tuningMode: 'initial',
-          userGoal: legacyParsed.aiDescription,
-          targetNodeId: legacyParsed.goal?.targetNodeId,
-          targetValue: legacyParsed.goal?.targetValue
-        });
+        // 自动检索知识库
+        try {
+          await knowledgeService.initialize();
+          if (knowledgeService.useAIEmbedding || knowledgeService.entries.length > 0) {
+            console.log('[AI 调参] 检索知识库...');
+            knowledgeResults = await knowledgeService.search(businessContext, 3, 0.3);
+            console.log('[AI 调参] 知识库命中:', knowledgeResults.length, '条');
+          }
+        } catch (err) {
+          console.warn('[AI 调参] 知识库检索失败:', err);
+          knowledgeResults = [];
+        }
       }
+
+      // 步骤 1.5：一致性验证（新增）
+      let consistencyResult = null;
+      try {
+        console.log('[AI 调参] 执行一致性验证...');
+        consistencyResult = consistencyValidationEngine.validateAll({
+          userInput: businessContext,
+          knowledgeEntries: knowledgeResults.length > 0 ? knowledgeResults : null,
+          nodes: nodes,
+          selectedScenario: activeScenarios
+        });
+
+        if (!consistencyResult.isConsistent) {
+          console.warn('[AI 调参] 一致性验证失败:', consistencyResult.warnings);
+          // 不阻断流程，但将警告传递给 AI Prompt
+        } else {
+          console.log('[AI 调参] 一致性验证通过');
+        }
+      } catch (err) {
+        console.warn('[AI 调参] 一致性验证失败:', err);
+        consistencyResult = null;
+      }
+
+      // 步骤 2：构建 AI Prompt（使用 aiPromptBuilder.js 中的 buildSmartTuningPrompt）
+      // 这个函数包含完整的 System Prompt 和输出格式要求（多因子强制、详细推理过程等）
+
+      console.log('[AI 调参] 节点选择模式:', nodeSelectorMode);
+      console.log('[AI 调参] 选择的指标:', selectedMetrics);
+      console.log('[AI 调参] 选择的驱动因子:', selectedDrivers);
+
+      let prompt = buildSmartTuningPrompt({
+        nodes,
+        businessContext: businessContext,
+        knowledgeResults: knowledgeResults,
+        selectedScenarios: activeScenarios,
+        consistencyResult: consistencyResult, // 传递一致性验证结果
+        // 节点选择
+        selectedMetrics: nodeSelectorMode === 'manual' ? selectedMetrics : [],
+        selectedDrivers: nodeSelectorMode === 'manual' ? selectedDrivers : [],
+        nodeSelectorMode: nodeSelectorMode
+      });
+
+      console.log('[AI 调参] Prompt 构建完成，system 长度:', prompt.system?.length);
 
       const response = await callAI(aiConfig, [
         { role: 'system', content: prompt.system },
@@ -231,6 +819,8 @@ const AITuningPanel = ({ onClose, onBringToFront }) => {
 
       // 调试：打印原始响应
       console.log('AI原始响应:', response.content);
+      console.log('AI 响应长度:', response.content.length);
+      console.log('AI 响应最后 100 字符:', response.content.substring(response.content.length - 100));
 
       const parsed = parseAIResponse(response.content, { originalContext: businessContext });
 
@@ -238,21 +828,323 @@ const AITuningPanel = ({ onClose, onBringToFront }) => {
         throw new Error(parsed.error || 'AI响应解析失败');
       }
 
-      setAiResult(parsed.data);
+      // 初始化 finalData
+      let finalData = parsed.data;
+
+      // 检查 AI 返回的数据是否足够
+      const aiAdjustments = finalData.adjustments || finalData.recommendations || [];
+
+      // 如果 AI 返回的 adjustments 不足 2 个，触发并集决策引擎融合知识库和兜底策略
+      if (aiAdjustments.length < 2) {
+        console.log('⚠️ AI 返回的调整方案不足 2 个，触发并集决策引擎...');
+
+        // 根据用户选择的模式决定兜底范围
+        let driverIds = null;
+        if (nodeSelectorMode === 'manual' && selectedDrivers.length > 0) {
+          // 用户指定了范围，只兜底这些因子
+          driverIds = selectedDrivers;
+          console.log('[兜底策略] 用户指定范围，只兜底:', driverIds);
+        }
+
+        const fallbackResult = fallbackStrategyEngine.execute({
+          nodes,
+          positiveTopN: 5,
+          negativeTopN: 5,
+          driverIds: driverIds // 新增参数，限制兜底范围
+        });
+
+        if (fallbackResult.success && fallbackResult.allAdjustments.length > 0) {
+          // 使用并集决策引擎融合知识库和兜底策略
+          console.log('[并集决策] 开始融合知识库和兜底策略...');
+
+          // 将知识库结果转换为决策引擎格式
+          const knowledgeCandidates = knowledgeResults.map(k => {
+            // 尝试从 factors 中获取 nodeId，或者用 title 匹配节点
+            let nodeId = k.factors?.[0]?.factorId || k.factors?.[0]?.id;
+            if (!nodeId) {
+              // 尝试用标题匹配节点名称
+              const matchedNode = Object.values(nodes).find(n =>
+                n.name === k.title || n.name?.includes(k.title) || k.title?.includes(n.name)
+              );
+              if (matchedNode) nodeId = matchedNode.id;
+            }
+
+            return {
+              nodeId,
+              nodeName: k.title,
+              currentValue: 0, // 知识库条目没有当前值
+              recommendedValue: 0,
+              changePercent: 0,
+              changeReason: `知识库案例：${k.title}`,
+              dataBasis: `历史经验：${k.scenario || '未指定'}`,
+              businessReason: k.description || '基于历史案例',
+              confidence: k.similarity || 0.6,
+              similarity: k.similarity,
+              source: 'knowledge',
+              raw: k
+            };
+          }).filter(k => k.nodeId); // 过滤掉没有 nodeId 的条目
+
+          console.log('[并集决策] 知识库候选:', knowledgeCandidates.length, '个，兜底候选:', fallbackResult.allAdjustments.length, '个');
+
+          // 执行并集决策
+          const unionResult = executeUnionDecision(
+            knowledgeCandidates,
+            fallbackResult.allAdjustments,
+            {
+              maxFactors: 5,
+              knowledgeBaseWeight: 0.7,
+              fallbackWeight: 0.3,
+              crossBoost: 1.1,
+              minPriorityThreshold: 0.5
+            }
+          );
+
+          console.log('[并集决策] 决策完成:', unionResult.summary);
+
+          // 转换为 AI 格式
+          const fusedAdjustments = convertToAIFORMat(unionResult);
+
+          if (fusedAdjustments.length > 0) {
+            console.log('并集决策生成成功，共', fusedAdjustments.length, '个调整方案');
+            finalData = {
+              ...finalData,
+              adjustments: fusedAdjustments,
+              recommendations: fusedAdjustments,
+              _unionDecisionUsed: true,
+              _unionDecisionMetadata: unionResult
+            };
+          }
+        }
+      }
+
+      // 如果数据被截断（缺少 expectedImpact 或 explanation），发起第二次请求补充
+      if (!finalData.expectedImpact || !finalData.explanation) {
+        console.log('⚠️ 检测到数据被截断，发起第二次请求补充详细信息...');
+        finalData = await supplementDetailedInfo(finalData, aiConfig, businessContext, nodes, knowledgeResults, activeScenarios);
+      }
+
+      // 修正 expectedImpact.keyMetrics 中的数据（使用实际模型数据）
+      if (finalData.expectedImpact && finalData.expectedImpact.keyMetrics) {
+        console.log('[AI 调参] 修正 keyMetrics 数据...');
+
+        // 先计算调整后的指标值
+        const adjustments = finalData.adjustments || finalData.recommendations || [];
+        const adjustedMetrics = calculateAdjustedMetrics(adjustments, nodes);
+
+        finalData.expectedImpact.keyMetrics = finalData.expectedImpact.keyMetrics.map(metric => {
+          // 从实际模型中查找匹配的指标
+          const actualNode = Object.values(nodes).find(n =>
+            n.name === metric.name ||
+            n.name?.includes(metric.name) ||
+            metric.name?.includes(n.name)
+          );
+
+          if (actualNode) {
+            console.log('[AI 调参] 找到匹配节点:', metric.name, '→', actualNode.name,
+                        '当前值:', actualNode.value, '目标值:', actualNode.targetValue,
+                        '类型:', actualNode.type, '公式:', actualNode.formula);
+
+            // 使用计算后的预期值（优先）
+            let expectedValue = metric.after;
+
+            if (adjustedMetrics[actualNode.id] !== undefined) {
+              expectedValue = adjustedMetrics[actualNode.id];
+              console.log('[AI 调参] 使用 calculateAdjustedMetrics 计算结果:', actualNode.name, '=', expectedValue);
+            } else if (actualNode.type === 'computed' && actualNode.formula) {
+              // 如果 calculateAdjustedMetrics 没有计算出结果，尝试直接计算公式
+              console.log('[AI 调参] calculateAdjustedMetrics 无结果，尝试直接计算公式...');
+
+              // 提取公式中的依赖（支持中文和英文 ID）
+              const formulaDeps = actualNode.formula.match(/[a-zA-Z_][a-zA-Z0-9_]*|[\u4e00-\u9fa5]+[a-zA-Z0-9_]*/g) || [];
+              console.log('  提取到的依赖:', formulaDeps);
+
+              const replaceMap = {};
+              formulaDeps.forEach(depCode => {
+                // 跳过纯数字
+                if (/^[\d.]+$/.test(depCode)) return;
+
+                const depNode = nodes[depCode];
+                if (depNode) {
+                  let value = depNode.value ?? 0;
+
+                  // 如果是驱动因子，使用调整后的值
+                  if (depNode.type === 'driver' && adjustedDriversMap[depNode.id] !== undefined) {
+                    value = adjustedDriversMap[depNode.id];
+                    console.log('  驱动因子（调整后）:', depNode.name, '=', value);
+                  }
+                  // 如果是计算指标，递归获取其值
+                  else if (depNode.type === 'computed' && adjustedMetrics[depNode.id] !== undefined) {
+                    value = adjustedMetrics[depNode.id];
+                    console.log('  计算指标（已计算）:', depNode.name, '=', value);
+                  } else {
+                    console.log('  使用原始值:', depNode.name, '=', value);
+                  }
+
+                  replaceMap[depCode] = value;
+                } else {
+                  console.log('  未找到依赖节点:', depCode);
+                }
+              });
+
+              console.log('  替换映射:', replaceMap);
+
+              // 替换并计算（按长度降序排序）
+              let calcExpression = actualNode.formula;
+              const sortedKeys = Object.keys(replaceMap).sort((a, b) => b.length - a.length);
+              sortedKeys.forEach(key => {
+                const value = replaceMap[key];
+                const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const regex = new RegExp(escapedKey, 'g');
+                calcExpression = calcExpression.replace(regex, value);
+                console.log('  替换:', key, '→', value);
+              });
+
+              console.log('  替换后的表达式:', calcExpression);
+
+              // 清理（移除空格）
+              const sanitized = calcExpression.replace(/\s+/g, '');
+              try {
+                expectedValue = Function('"use strict";return (' + sanitized + ')')();
+                console.log('[AI 调参] 直接公式计算结果:', actualNode.name, '=', expectedValue);
+              } catch (e) {
+                console.warn('[AI 调参] 公式计算失败:', actualNode.name, actualNode.formula, e.message);
+              }
+            } else {
+              console.log('[AI 调参] 使用 AI 返回的预期值:', metric.name, '=', expectedValue);
+            }
+
+            return {
+              ...metric,
+              name: actualNode.name, // 使用实际的指标名称
+              before: actualNode.value ?? metric.before, // 使用实际当前值
+              target: actualNode.targetValue ?? metric.target, // 使用实际目标值
+              after: expectedValue // 使用计算后的预期值
+            };
+          }
+
+          // 如果找不到匹配的节点，尝试从 computed 指标中查找
+          const computedNode = Object.values(nodes).find(n =>
+            n.type === 'computed' &&
+            (n.name === metric.name || n.name?.includes(metric.name))
+          );
+
+          if (computedNode) {
+            console.log('[AI 调参] 找到 computed 节点:', metric.name, '→', computedNode.name,
+                        '公式:', computedNode.formula);
+
+            // 使用计算后的预期值
+            let expectedValue = metric.after;
+
+            if (adjustedMetrics[computedNode.id] !== undefined) {
+              expectedValue = adjustedMetrics[computedNode.id];
+              console.log('[AI 调参] 使用 calculateAdjustedMetrics 计算结果:', computedNode.name, '=', expectedValue);
+            } else if (computedNode.formula) {
+              // 尝试直接计算公式
+              console.log('[AI 调参] calculateAdjustedMetrics 无结果，尝试直接计算公式...');
+
+              // 提取公式中的依赖（支持中文和英文 ID）
+              const formulaDeps = computedNode.formula.match(/[a-zA-Z_][a-zA-Z0-9_]*|[\u4e00-\u9fa5]+[a-zA-Z0-9_]*/g) || [];
+              console.log('  提取到的依赖:', formulaDeps);
+
+              const replaceMap = {};
+              formulaDeps.forEach(depCode => {
+                // 跳过纯数字
+                if (/^[\d.]+$/.test(depCode)) return;
+
+                const depNode = nodes[depCode];
+                if (depNode) {
+                  let value = depNode.value ?? 0;
+
+                  // 如果是驱动因子，使用调整后的值
+                  if (depNode.type === 'driver' && adjustedDriversMap[depNode.id] !== undefined) {
+                    value = adjustedDriversMap[depNode.id];
+                    console.log('  驱动因子（调整后）:', depNode.name, '=', value);
+                  }
+                  // 如果是计算指标，递归获取其值
+                  else if (depNode.type === 'computed' && adjustedMetrics[depNode.id] !== undefined) {
+                    value = adjustedMetrics[depNode.id];
+                    console.log('  计算指标（已计算）:', depNode.name, '=', value);
+                  } else {
+                    console.log('  使用原始值:', depNode.name, '=', value);
+                  }
+
+                  replaceMap[depCode] = value;
+                } else {
+                  console.log('  未找到依赖节点:', depCode);
+                }
+              });
+
+              console.log('  替换映射:', replaceMap);
+
+              // 替换并计算（按长度降序排序）
+              let calcExpression = computedNode.formula;
+              const sortedKeys = Object.keys(replaceMap).sort((a, b) => b.length - a.length);
+              sortedKeys.forEach(key => {
+                const value = replaceMap[key];
+                const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const regex = new RegExp(escapedKey, 'g');
+                calcExpression = calcExpression.replace(regex, value);
+                console.log('  替换:', key, '→', value);
+              });
+
+              console.log('  替换后的表达式:', calcExpression);
+
+              // 清理（移除空格）
+              const sanitized = calcExpression.replace(/\s+/g, '');
+              try {
+                expectedValue = Function('"use strict";return (' + sanitized + ')')();
+                console.log('[AI 调参] 直接公式计算结果:', computedNode.name, '=', expectedValue);
+              } catch (e) {
+                console.warn('[AI 调参] 公式计算失败:', computedNode.name, computedNode.formula, e.message);
+              }
+            }
+
+            return {
+              ...metric,
+              name: computedNode.name,
+              before: computedNode.value ?? metric.before,
+              target: computedNode.targetValue ?? metric.target,
+              after: expectedValue
+            };
+          }
+
+          // 都找不到，返回原数据（但记录警告）
+          console.warn('[AI 调参] 无法匹配模型数据，使用 AI 生成的指标:', metric.name);
+          return metric;
+        });
+        console.log('[AI 调参] 修正后的 keyMetrics:', finalData.expectedImpact.keyMetrics);
+      }
+
+      // 等待所有数据完成后再更新 UI
+      setAiResult(finalData);
+      // 调试：打印 AI 返回的完整数据结构
+      console.log('[AI 调参] AI 返回的完整数据:', JSON.stringify(finalData, null, 2));
+      console.log('[AI 调参] understanding:', finalData?.understanding);
+      console.log('[AI 调参] dataAnalysis:', finalData?.dataAnalysis);
+      console.log('[AI 调参] expectedImpact:', finalData?.expectedImpact);
+      console.log('[AI 调参] explanation:', finalData?.explanation);
 
       // 初始化可编辑的调整方案（添加唯一ID）
-      const adjustments = parsed.data.adjustments || parsed.data.recommendations || [];
-      setEditableAdjustments(adjustments.map((adj, i) => ({ ...adj, _id: `adj_${i}_${Date.now()}` })));
+      const adjustments = finalData.adjustments || finalData.recommendations || [];
+      setEditableAdjustments(adjustments.map((adj, i) => ({
+        ...adj,
+        _id: `adj_${i}_${Date.now()}`,
+        isAIRecommend: adj.isFallback ? false : true // 标记是否来自 AI
+      })));
       setIsEditingMode(true);
 
-      // 验证目标达成情况
-      validateTargetAchievement(adjustments, businessContext);
+      // 验证目标达成情况（传入 aiResult 以便从中提取目标）
+      validateTargetAchievement(adjustments, businessContext, finalData);
 
-      // 默认展开关键区域
+      // 默认展开关键区域（包括业务理解和 AI 推理过程）
       setExpandedSections(prev => ({
         ...prev,
+        understanding: true, // 展开业务理解
+        dataAnalysis: true,
         impact: true,
-        adjustments: true
+        adjustments: true,
+        explanation: true // 展开 AI 推理过程
       }));
 
     } catch (err) {
@@ -263,6 +1155,155 @@ const AITuningPanel = ({ onClose, onBringToFront }) => {
   };
 
   // ===== 应用建议 =====
+
+  /**
+   * 第二次请求：补充详细信息（expectedImpact、explanation）
+   * @returns {Promise<Object>} 合并后的完整数据
+   */
+  const supplementDetailedInfo = async (partialData, aiConfig, businessContext, nodes, knowledgeResults, activeScenarios) => {
+    try {
+      console.log('🔄 开始补充详细信息...');
+
+      // 构建简短的 Prompt，补充预期效果、explanation、dataAnalysis 和每个 adjustment 的详细信息
+      const supplementPrompt = `
+基于以下已确定的调整方案，请补充预期效果分析、数据洞察和详细推理过程。
+
+【已确定的调整方案】
+${JSON.stringify(partialData.adjustments, null, 2)}
+
+【模型数据】
+${JSON.stringify({
+  drivers: Object.values(nodes).filter(n => n.type === 'driver').map(n => ({
+    id: n.id,
+    name: n.name,
+    value: n.value,
+    baseline: n.baseline,
+    targetValue: n.targetValue,
+    timeData: n.timeData // 添加时间序列数据用于趋势分析
+  }))
+}, null, 2)}
+
+【业务背景】
+${businessContext}
+
+【输出格式要求】
+只返回以下 JSON 格式（不要包含 adjustments）：
+{
+  "dataAnalysis": {
+    "trends": [
+      {"factor": "因子名称", "pattern": "基于实际数据的趋势描述", "seasonality": "季节性特征（如有）"}
+    ],
+    "sensitivity": [
+      {"factor": "因子名称", "impact": "high|medium|low", "correlation": "positive|negative", "elasticity": 数值}
+    ],
+    "risks": [
+      {"factor": "因子名称", "riskLevel": "高 | 中|低", "description": "风险描述", "recommendation": "建议"}
+    ]
+  },
+  "expectedImpact": {
+    "keyMetrics": [
+      {"name": "净利润", "before": 数值，"after": 数值，"change": "+XX%", "probability": "XX%"}
+    ],
+    "sensitivityScenario": [
+      {"scenario": "乐观", "result": 数值，"assumption": "假设说明"},
+      {"scenario": "基准", "result": 数值，"assumption": "假设说明"},
+      {"scenario": "悲观", "result": 数值，"assumption": "假设说明"}
+    ],
+    "summary": "整体影响说明"
+  },
+  "explanation": "详细的调整思路和多因子协同逻辑",
+  "adjustmentDetails": [
+    {
+      "nodeId": "因子节点 ID",
+      "dataBasis": "数据依据",
+      "businessReason": "业务理由",
+      "riskWarning": "风险提示",
+      "factorLinkage": "因子联动"
+    }
+  ]
+}
+
+注意：
+1. 只返回 JSON，不要包含 markdown 代码块
+2. dataAnalysis 必须基于实际模型数据和时间序列数据分析
+3. trends 至少包含 1 个有实际数据支撑的趋势
+4. sensitivity 至少包含 1 个因子的敏感性分析
+5. adjustmentDetails 数组必须包含每个调整因子的详细信息
+`;
+
+      const response = await callAI(aiConfig, [
+        { role: 'system', content: '你是一位专业的业务分析专家，请补充调整方案的预期效果和推理过程。' },
+        { role: 'user', content: supplementPrompt }
+      ]);
+
+      console.log('🔄 补充响应:', response.content);
+
+      // 解析补充的响应
+      const supplementParsed = parseAIResponse(response.content);
+      if (supplementParsed.success) {
+        console.log('🔄 补充数据解析成功:', supplementParsed.data);
+
+        // 合并 adjustmentDetails 到 adjustments 中
+        let mergedAdjustments = [...partialData.adjustments];
+
+        if (supplementParsed.data.adjustmentDetails && Array.isArray(supplementParsed.data.adjustmentDetails)) {
+          console.log('🔄 合并 adjustmentDetails:', supplementParsed.data.adjustmentDetails.length, '个');
+          console.log('🔄 原始 adjustments:', mergedAdjustments.map(a => ({ nodeId: a.nodeId, nodeName: a.nodeName })));
+
+          // 将 adjustmentDetails 合并到对应的 adjustment 中
+          supplementParsed.data.adjustmentDetails.forEach(detail => {
+            console.log('🔄 尝试合并 detail:', detail.nodeId, detail.nodeName);
+
+            // 尝试多种匹配方式：nodeId 精确匹配 或 nodeName 名称匹配
+            const idx = mergedAdjustments.findIndex(adj =>
+              adj.nodeId === detail.nodeId ||           // nodeId 精确匹配
+              adj.nodeName === detail.nodeId ||         // nodeName 与 detail.nodeId 匹配（AI 可能返回名称）
+              adj.nodeName === detail.nodeName ||       // nodeName 精确匹配
+              (adj.nodeName && adj.nodeName.includes(detail.nodeId)) || // 包含匹配
+              (detail.nodeName && adj.nodeName?.includes(detail.nodeName))
+            );
+
+            if (idx !== -1) {
+              console.log('✅ 找到匹配，索引:', idx, mergedAdjustments[idx].nodeName);
+              mergedAdjustments[idx] = {
+                ...mergedAdjustments[idx],
+                dataBasis: detail.dataBasis || mergedAdjustments[idx].dataBasis,
+                businessReason: detail.businessReason || mergedAdjustments[idx].businessReason,
+                riskWarning: detail.riskWarning || mergedAdjustments[idx].riskWarning,
+                factorLinkage: detail.factorLinkage || mergedAdjustments[idx].factorLinkage
+              };
+            } else {
+              console.warn('⚠️ 未找到匹配的 adjustment:', detail);
+              console.warn('  可用 adjustments:', mergedAdjustments.map(a => ({ nodeId: a.nodeId, nodeName: a.nodeName })));
+            }
+          });
+        } else {
+          console.log('🔄 无 adjustmentDetails，检查是否是第一次请求直接返回的数据');
+        }
+
+        // 合并数据
+        const mergedData = {
+          ...partialData,
+          adjustments: mergedAdjustments,
+          recommendations: mergedAdjustments,
+          dataAnalysis: supplementParsed.data.dataAnalysis || partialData.dataAnalysis,
+          expectedImpact: supplementParsed.data.expectedImpact || partialData.expectedImpact,
+          explanation: supplementParsed.data.explanation || partialData.explanation,
+          _supplemented: true
+        };
+
+        console.log('🔄 数据合并成功:', mergedData);
+        // 不再在这里调用 setAiResult，由主流程统一处理
+        return mergedData;
+      } else {
+        console.warn('⚠️ 补充数据解析失败:', supplementParsed);
+      }
+    } catch (err) {
+      console.error('⚠️ 补充详细信息出错:', err);
+    }
+    // 失败时返回原始数据
+    return partialData;
+  };
 
   const applyRecommendations = (mode = 'all') => {
     // 使用用户编辑后的调整方案
@@ -413,8 +1454,8 @@ const AITuningPanel = ({ onClose, onBringToFront }) => {
               rec.monthlyFactors.slice(8, 12).forEach((factor, index) => {
                 const monthNum = index + 9;
 
-                // 根据策略系数比例分配
-                const proportion = forecastFactorSum > 0 ? factor / forecastFactorSum : 0.25;
+                // 根据策略系数比例分配（默认平均分配）
+                const proportion = forecastFactorSum > 0 ? factor / forecastFactorSum : 1 / 4; // 9-12 月平均分配
                 const strategyValue = Math.round(remainingForForecast * proportion * 100) / 100;
 
                 // 尝试找到对应月份的 key
@@ -576,22 +1617,22 @@ const AITuningPanel = ({ onClose, onBringToFront }) => {
     if (isCostFactor && hasRevenueChildren) {
       // 比例跟随型 - 跟随收入波动
       monthlyStrategy = '比例跟随型';
-      monthlyFactors = [0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.2, 1.3, 1.4];
+      monthlyFactors = Array.from({ length: 12 }, (_, i) => Math.round((0.7 + i * 0.06) * 100) / 100); // 动态生成增长序列 [0.7, 0.76, ..., 1.36]
       strategyBadge = '比例跟随';
     } else if (isCostFactor) {
       // 成本优化型 - 前低后高
       monthlyStrategy = '成本优化型';
-      monthlyFactors = [1.1, 1.05, 1.0, 1.0, 0.95, 0.95, 0.9, 0.9, 0.85, 0.85, 0.8, 0.75];
+      monthlyFactors = Array.from({ length: 12 }, (_, i) => Math.round((1.1 - i * 0.025) * 100) / 100); // 动态生成递减序列 [1.1, 1.075, ..., 0.825]
       strategyBadge = '成本优化';
     } else if (/收入|Revenue|Sales/i.test(nodeName)) {
       // 收入增长型 - 前低后高（旺季在后面）
       monthlyStrategy = '收入增长型';
-      monthlyFactors = [0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.2, 1.3, 1.4];
+      monthlyFactors = Array.from({ length: 12 }, (_, i) => Math.round((0.7 + i * 0.06) * 100) / 100); // 动态生成增长序列 [0.7, 0.76, ..., 1.36]
       strategyBadge = '收入增长';
     } else {
       // 默认平均分配
       monthlyStrategy = '平均分配';
-      monthlyFactors = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+      monthlyFactors = Array(12).fill(1.0); // 平均分配
       strategyBadge = '平均分配';
     }
 
@@ -750,8 +1791,15 @@ const AITuningPanel = ({ onClose, onBringToFront }) => {
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2">
             <span className="font-medium text-gray-800">{adjustment.nodeName}</span>
-            {adjustment.derived && (
+            {adjustment.isAIRecommend && (
+              
+
               <span className="text-xs bg-indigo-100 text-indigo-600 px-1.5 py-0.5 rounded">AI推导</span>
+            )}
+            {adjustment.isManualAdd && (
+              <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded">
+                ✏️ 手工添加
+              </span>
             )}
           </div>
           <div className="flex items-center gap-2">
@@ -799,7 +1847,11 @@ const AITuningPanel = ({ onClose, onBringToFront }) => {
 
         {/* 详细说明 - 可折叠 */}
         <button
-          onClick={() => setIsExpanded(!isExpanded)}
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setIsExpanded(!isExpanded);
+          }}
           className="text-xs text-indigo-600 hover:text-indigo-800 flex items-center gap-1"
         >
           <svg className={`w-3 h-3 transition-transform ${isExpanded ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -809,20 +1861,112 @@ const AITuningPanel = ({ onClose, onBringToFront }) => {
         </button>
 
         {isExpanded && (
-          <div className="mt-2 pt-2 border-t border-gray-100 space-y-1">
-            {adjustment.dataBasis && (
-              <div className="text-xs text-gray-500">
-                <span className="font-medium">数据依据：</span>{adjustment.dataBasis}
+          <div className="mt-3 pt-3 border-t border-gray-200 space-y-3">
+            {/* 数据依据 */}
+            {adjustment.dataBasis ? (
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-2.5">
+                <div className="flex items-center gap-1.5 mb-1">
+                  <svg className="w-3.5 h-3.5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                  </svg>
+                  <span className="font-medium text-blue-800 text-xs">数据依据</span>
+                </div>
+                <div className="text-xs text-blue-700 leading-relaxed">{adjustment.dataBasis}</div>
+              </div>
+            ) : (
+              <div className="bg-gray-50 border border-gray-200 rounded-lg p-2.5 text-center">
+                <span className="text-xs text-gray-400">数据依据：等待补充...</span>
               </div>
             )}
-            {adjustment.businessReason && (
-              <div className="text-xs text-gray-500">
-                <span className="font-medium">业务理由：</span>{adjustment.businessReason}
+
+            {/* 业务理由 */}
+            {adjustment.businessReason ? (
+              <div className="bg-green-50 border border-green-200 rounded-lg p-2.5">
+                <div className="flex items-center gap-1.5 mb-1">
+                  <svg className="w-3.5 h-3.5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                  </svg>
+                  <span className="font-medium text-green-800 text-xs">业务理由</span>
+                </div>
+                <div className="text-xs text-green-700 leading-relaxed">{adjustment.businessReason}</div>
+              </div>
+            ) : (
+              <div className="bg-gray-50 border border-gray-200 rounded-lg p-2.5 text-center">
+                <span className="text-xs text-gray-400">业务理由：等待补充...</span>
               </div>
             )}
-            {adjustment.riskWarning && (
-              <div className="text-xs text-yellow-600">
-                <span className="font-medium">⚠️ 风险提示：</span>{adjustment.riskWarning}
+
+            {/* 风险提示 */}
+            {adjustment.riskWarning ? (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-2.5">
+                <div className="flex items-center gap-1.5 mb-1">
+                  <svg className="w-3.5 h-3.5 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                  <span className="font-medium text-amber-800 text-xs">风险提示</span>
+                </div>
+                <div className="text-xs text-amber-700 leading-relaxed">{adjustment.riskWarning}</div>
+              </div>
+            ) : (
+              <div className="bg-gray-50 border border-gray-200 rounded-lg p-2.5 text-center">
+                <span className="text-xs text-gray-400">风险提示：暂无</span>
+              </div>
+            )}
+
+            {/* 因子联动说明 */}
+            {adjustment.factorLinkage ? (
+              <div className="bg-purple-50 border border-purple-200 rounded-lg p-2.5">
+                <div className="flex items-center gap-1.5 mb-1">
+                  <svg className="w-3.5 h-3.5 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                  </svg>
+                  <span className="font-medium text-purple-800 text-xs">因子联动</span>
+                </div>
+                <div className="text-xs text-purple-700 leading-relaxed">{adjustment.factorLinkage}</div>
+              </div>
+            ) : null}
+
+            {/* 月度分配详情 */}
+            {adjustment.monthlyFactors && adjustment.monthlyFactors.length === 12 ? (
+              <div className="bg-gray-50 border border-gray-200 rounded-lg p-2.5 mt-2">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-1.5">
+                    <svg className="w-3.5 h-3.5 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                    </svg>
+                    <span className="font-medium text-gray-700 text-xs">月度分配详情</span>
+                  </div>
+                  <span className="text-xs text-indigo-600 font-medium">{adjustment.monthlyStrategy || '策略'}</span>
+                </div>
+                {/* 月度系数柱状图 */}
+                <div className="flex items-end justify-between gap-1 h-20 pb-1">
+                  {adjustment.monthlyFactors.map((factor, idx) => {
+                    const maxFactor = Math.max(...adjustment.monthlyFactors);
+                    const heightPercent = maxFactor > 0 ? Math.min(100, Math.max(10, (factor / maxFactor) * 100)) : 10;
+                    const isAboveAvg = factor > 1;
+                    return (
+                      <div key={idx} className="flex-1 min-w-0 flex flex-col items-center gap-1 group relative">
+                        <div
+                          className="w-full rounded-t-sm transition-all hover:opacity-80"
+                          style={{
+                            height: `${(heightPercent / 100) * 64}px`,
+                            background: isAboveAvg
+                              ? 'linear-gradient(to top, rgb(99 102 241), rgb(168 85 247))'
+                              : 'linear-gradient(to top, rgb(156 163 175), rgb(209 213 219))'
+                          }}
+                          title={`${idx + 1}月：${factor}`}
+                        />
+                        <span className="text-[8px] text-gray-500 leading-none">{idx + 1}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : (
+              <div className="bg-gray-50 border border-gray-200 rounded-lg p-2.5 mt-2 text-center">
+                <span className="text-xs text-gray-400">
+                  月度数据：{adjustment.monthlyFactors ? `长度${adjustment.monthlyFactors.length}` : '无'}
+                </span>
               </div>
             )}
           </div>
@@ -1005,6 +2149,68 @@ const AITuningPanel = ({ onClose, onBringToFront }) => {
 
   // ===== 主渲染 =====
 
+  // 如果模型未加载，显示提示
+  if (!hasModel) {
+    return (
+      <div
+        ref={containerRef}
+        className="fixed bg-white rounded-lg shadow-2xl border border-gray-200 w-[800px] h-[400px] flex flex-col resize overflow-auto"
+        style={{ left: position.x, top: position.y, zIndex: 100, minWidth: '640px', minHeight: '500px' }}
+      >
+        {/* 标题栏 */}
+        <div
+          className="flex items-center justify-between px-4 py-3 bg-gradient-to-r from-indigo-500 to-purple-500 rounded-t-lg cursor-move shrink-0"
+          onMouseDown={handleMouseDown}
+        >
+          <div className="flex items-center gap-2">
+            <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+            </svg>
+            <span className="text-white font-medium">AI 智能调参</span>
+          </div>
+          <button onClick={onClose} className="text-white/80 hover:text-white">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        {/* 内容区 */}
+        <div className="flex-1 overflow-y-auto p-8">
+          <div className="flex flex-col items-center justify-center h-full text-center">
+            <div className="w-20 h-20 bg-gray-100 rounded-full flex items-center justify-center mb-4">
+              <svg className="w-10 h-10 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+              </svg>
+            </div>
+            <h3 className="text-lg font-medium text-gray-800 mb-2">指标模型未加载</h3>
+            <p className="text-sm text-gray-500 mb-6 max-w-md">
+              AI 调参功能需要指标模型才能运行。请先导入或创建指标模型（包含初始数据和计算关系）。
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={onClose}
+                className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors"
+              >
+                关闭
+              </button>
+              <button
+                onClick={() => {
+                  onClose();
+                  // 触发导入事件
+                  window.dispatchEvent(new CustomEvent('vdt-open-import'));
+                }}
+                className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors"
+              >
+                导入指标模型
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       ref={containerRef}
@@ -1116,6 +2322,54 @@ const AITuningPanel = ({ onClose, onBringToFront }) => {
               </button>
             </div>
           )}
+
+          {/* 节点选择器 */}
+          <div className="mt-4">
+            <NodeSelector
+              nodes={nodes}
+              selectedMetrics={selectedMetrics}
+              selectedDrivers={selectedDrivers}
+              targetMetric={selectedMetrics.length > 0 ? selectedMetrics[0] : null}
+              mode={nodeSelectorMode}
+              onChange={(selection) => {
+                setSelectedMetrics(selection.metrics);
+                setSelectedDrivers(selection.drivers);
+                setNodeSelectorMode(selection.mode);
+              }}
+            />
+          </div>
+
+          {/* 冲突警告 */}
+          {conflictWarnings.length > 0 && (
+            <div className="mt-3 space-y-2">
+              {conflictWarnings.map((warning, i) => (
+                <div key={i} className="p-2 bg-yellow-50 border border-yellow-200 rounded-lg">
+                  <div className="flex items-start gap-2">
+                    <span className="text-sm">⚠️</span>
+                    <div className="text-sm text-yellow-800">{warning.message}</div>
+                  </div>
+                  <div className="flex gap-2 mt-2">
+                    <button
+                      onClick={() => warning.onConfirm?.()}
+                      className="text-xs px-2 py-1 bg-yellow-200 hover:bg-yellow-300 text-yellow-800 rounded"
+                    >
+                      {warning.confirmText || '确认'}
+                    </button>
+                    <button
+                      onClick={() => {
+                        const newWarnings = [...conflictWarnings];
+                        newWarnings.splice(i, 1);
+                        setConflictWarnings(newWarnings);
+                      }}
+                      className="text-xs px-2 py-1 bg-gray-200 hover:bg-gray-300 text-gray-600 rounded"
+                    >
+                      忽略
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* ===== AI理解摘要（实时显示） ===== */}
@@ -1146,6 +2400,86 @@ const AITuningPanel = ({ onClose, onBringToFront }) => {
             )}
           </div>
         )}
+
+        {/* ===== 已选场景和知识库 ===== */}
+        <div className="px-4 pb-3 bg-gradient-to-r from-indigo-50 to-purple-50 border-b">
+          <div className="flex items-center gap-4">
+            {/* 已选场景 */}
+            <div className="flex-1">
+              <div className="text-xs text-gray-500 mb-1">📋 已选场景</div>
+              <div className="flex items-center gap-2">
+                {activeScenarios.length > 0 ? (
+                  <div className="flex flex-wrap gap-1">
+                    {activeScenarios.map(s => (
+                      <span key={s.id} className="px-2 py-1 text-xs bg-indigo-100 text-indigo-700 rounded">
+                        {s.name}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <span className="text-xs text-orange-500 font-medium">⚠️ 未选择</span>
+                )}
+              </div>
+            </div>
+            {/* 已选知识库 */}
+            <div className="flex-1">
+              <div className="text-xs text-gray-500 mb-1">📚 已选知识库</div>
+              <div className="flex items-center gap-2">
+                {selectedKnowledgeEntries.length > 0 ? (
+                  <div className="flex flex-wrap gap-1">
+                    {selectedKnowledgeEntries.map(e => (
+                      <span key={e.id} className="px-2 py-1 text-xs bg-green-100 text-green-700 rounded">
+                        {e.title?.substring(0, 10) || e.scenario || '知识库'}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <span className="text-xs text-orange-500 font-medium">⚠️ 未选择</span>
+                )}
+              </div>
+            </div>
+            {/* 快速入口按钮 */}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  // 通过触发 Toolbar 中的按钮来打开场景选择
+                  const event = new MouseEvent('click', { bubbles: true });
+                  const scenarioBtn = Array.from(document.querySelectorAll('button')).find(btn =>
+                    btn.textContent.includes('选择场景') || btn.textContent.includes('场景选择')
+                  );
+                  // 如果找不到，尝试调用 window 上的方法
+                  if (window.showScenarioSelectorSetter) {
+                    window.showScenarioSelectorSetter(true);
+                  } else if (scenarioBtn) {
+                    scenarioBtn.click();
+                  } else {
+                    alert('请通过顶部工具栏「AI 决策」→「场景选择」打开');
+                  }
+                }}
+                className="px-3 py-1.5 text-xs bg-indigo-600 text-white rounded hover:bg-indigo-700 transition-colors"
+              >
+                选择场景
+              </button>
+              <button
+                onClick={() => {
+                  const kbBtn = Array.from(document.querySelectorAll('button')).find(btn =>
+                    btn.textContent.includes('选择知识库') || btn.textContent.includes('知识库')
+                  );
+                  if (window.showKnowledgeBaseSetter) {
+                    window.showKnowledgeBaseSetter(true);
+                  } else if (kbBtn) {
+                    kbBtn.click();
+                  } else {
+                    alert('请通过顶部工具栏「AI 决策」→「知识库」打开');
+                  }
+                }}
+                className="px-3 py-1.5 text-xs bg-green-600 text-white rounded hover:bg-green-700 transition-colors"
+              >
+                选择知识库
+              </button>
+            </div>
+          </div>
+        </div>
 
         {/* ===== 开始分析按钮 ===== */}
         <div className="p-4">
@@ -1201,6 +2535,19 @@ const AITuningPanel = ({ onClose, onBringToFront }) => {
                 />
                 {expandedSections.understanding && (
                   <div className="p-4 space-y-3">
+                    {/* 场景类型显示 */}
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="text-xs font-medium text-gray-500">📋 场景类型:</span>
+                      <span className="px-2 py-1 text-xs bg-indigo-100 text-indigo-700 rounded font-medium">
+                        {aiResult.understanding.scenarioType || '自动识别'}
+                      </span>
+                      {activeScenarios.length > 0 && (
+                        <span className="text-xs text-gray-400">
+                          (已选：{activeScenarios.map(s => s.name).join(', ')})
+                        </span>
+                      )}
+                    </div>
+                    {/* 业务背景理解 */}
                     <div className="text-sm text-gray-700 bg-gray-50 p-3 rounded">
                       {aiResult.understanding.businessContext}
                     </div>
@@ -1373,6 +2720,47 @@ const AITuningPanel = ({ onClose, onBringToFront }) => {
                         {aiResult.expectedImpact.summary}
                       </div>
                     )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* 目标验证结果（单独显示，不在调整列表中） */}
+            {validationResult && (
+              <div className="border-b border-gray-200">
+                <SectionHeader
+                  title="📊 目标验证"
+                  icon=""
+                  badge={validationResult.riskWarning?.includes('✅') ? '达标' : '未达标'}
+                  badgeColor={validationResult.riskWarning?.includes('✅') ? 'green' : 'orange'}
+                  expanded={expandedSections.validation}
+                  onToggle={() => toggleSection('validation')}
+                />
+                {expandedSections.validation && (
+                  <div className="p-4 space-y-3">
+                    <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                      <div>
+                        <div className="text-sm text-gray-600">预期{validationResult.metricName || '净利润'}</div>
+                        <div className="text-2xl font-bold text-gray-900">{validationResult.formattedValue || validationResult.currentValue}</div>
+                      </div>
+                      <div className="text-gray-400">→</div>
+                      <div>
+                        <div className="text-sm text-gray-600">目标{validationResult.metricName || '净利润'}</div>
+                        <div className="text-2xl font-bold text-gray-900">{validationResult.formattedTarget || validationResult.recommendedValue}</div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-sm text-gray-600">差距</div>
+                        <div className={`text-xl font-bold ${validationResult.gap >= 0 ? 'text-green-600' : 'text-orange-600'}`}>
+                          {validationResult.gap >= 0 ? '超出' : '差距'}{validationResult.formattedGap || Math.round(Math.abs(validationResult.currentValue - validationResult.recommendedValue))}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="text-sm text-gray-600">
+                      <strong>计算逻辑：</strong>{validationResult.businessReason}
+                    </div>
+                    <div className={`text-sm p-2 rounded ${validationResult.riskWarning?.includes('✅') ? 'bg-green-50 text-green-700' : 'bg-orange-50 text-orange-700'}`}>
+                      {validationResult.riskWarning}
+                    </div>
                   </div>
                 )}
               </div>

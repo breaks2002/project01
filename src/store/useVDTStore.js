@@ -1604,8 +1604,38 @@ const useVDTStore = create((set, get) => {
       // 确保导入的节点有默认字段，并且按 id 去重
       const nodes = modelData.nodes || {};
       const normalizedNodes = {};
+      const validationErrors = []; // 收集校验错误
+
+      // 如果是追加模式，获取现有节点用于校验
+      const existingNodes = append ? get().nodes : {};
+
       Object.values(nodes).forEach((node) => {
         if (node && node.id) {
+          // ===== 防呆校验：检查 ID 和 Name 的唯一性 =====
+          // 1. 检查 ID 是否与现有节点的 ID 重复
+          if (existingNodes[node.id]) {
+            validationErrors.push(`节点 ID "${node.id}" 与现有节点 "${existingNodes[node.id].name}" 重复`);
+          }
+
+          // 2. 检查 ID 是否与现有节点的 Name 重复
+          const idNameConflict = Object.values(existingNodes).find(n => n.name === node.id);
+          if (idNameConflict) {
+            validationErrors.push(`节点 ID "${node.id}" 与现有节点 "${idNameConflict.name}" 的名称重复`);
+          }
+
+          // 3. 检查 Name 是否与现有节点的 ID 重复
+          const nameIdConflict = Object.values(existingNodes).find(n => n.id === node.name);
+          if (nameIdConflict) {
+            validationErrors.push(`节点名称 "${node.name}" 与现有节点 "${nameIdConflict.name}" 的 ID 重复`);
+          }
+
+          // 4. 检查 Name 是否与现有节点的 Name 重复
+          const nameConflict = Object.values(existingNodes).find(n => n.name === node.name);
+          if (nameConflict) {
+            validationErrors.push(`节点名称 "${node.name}" 与现有节点 "${nameConflict.name}" 的名称重复`);
+          }
+          // ===== 校验结束 =====
+
           // 计算初始基准值：
           // - 驱动因子：用 timeData 的实际+预测按 aggregationType 聚合
           // - 计算指标：用 node.value（公式计算出的初始值）
@@ -1655,6 +1685,20 @@ const useVDTStore = create((set, get) => {
           };
         }
       });
+
+      // 处理校验错误
+      if (validationErrors.length > 0) {
+        const errorMessage = '导入模型时发现以下问题：\n\n' + validationErrors.join('\n');
+
+        if (append) {
+          // 追加模式：有冲突时阻止导入
+          alert(errorMessage + '\n\n导入已取消。请先解决冲突后再试。');
+          return;
+        } else {
+          // 覆盖模式：仅警告，允许导入（因为覆盖模式通常意味着全新导入）
+          console.warn('[useVDTStore] 导入模型警告:', validationErrors);
+        }
+      }
 
       if (append) {
         // 追加模式：合并到现有节点

@@ -1,5 +1,6 @@
 import React from 'react';
 import ScenarioManager from './ScenarioManager';
+import useVDTStore from '../../store/useVDTStore';
 
 const Toolbar = ({
   onOpenEditor,
@@ -35,8 +36,15 @@ const Toolbar = ({
   onOpenAIConfig,
   showAIConfig,
   onOpenAITuning,
-  showAITuning
+  showAITuning,
+  onOpenKnowledgeBase,
+  showKnowledgeBase,
+  onOpenScenarioSelector
 }) => {
+  // 获取模型数据检查是否已加载
+  const nodes = useVDTStore((s) => s.nodes);
+  const hasModel = Object.keys(nodes).length > 0;
+
   return (
     <div className="h-14 bg-white border-b px-4 flex items-center justify-between shadow-sm">
       <div className="flex items-center gap-3">
@@ -114,31 +122,72 @@ const Toolbar = ({
           <span>标准差分析</span>
         </button>
 
-        {/* AI配置按钮 */}
-        <button
-          onClick={onOpenAIConfig}
-          className={`shrink-0 px-4 py-2 rounded-lg flex items-center gap-2 font-medium shadow-sm whitespace-nowrap ${
-            showAIConfig
-              ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white hover:from-indigo-700 hover:to-purple-700'
+        {/* AI 配置按钮 */}
+        <div className="relative group">
+          <button className={`shrink-0 px-4 py-2 rounded-lg flex items-center gap-2 font-medium shadow-sm whitespace-nowrap ${
+            showAIConfig || showAITuning
+              ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white'
               : 'bg-gradient-to-r from-indigo-400 to-purple-400 text-white hover:from-indigo-500 hover:to-purple-500'
-          }`}
-        >
-          <span>⚙️</span>
-          <span>AI配置</span>
-        </button>
+          }`}>
+            <span>🤖</span>
+            <span>AI 决策</span>
+            <span className="text-xs">▼</span>
+          </button>
+          {/* 下拉菜单：添加 invisible bridge 防止消失 */}
+          <div className="absolute top-full left-0 pt-1 bg-transparent min-w-48 z-50">
+            <div className="bg-white border rounded-lg shadow-lg py-2 hidden group-hover:block">
+            <button
+              onClick={onOpenAIConfig}
+              className="w-full px-4 py-2 text-left hover:bg-gray-50 text-sm flex items-center gap-2"
+            >
+              <span>⚙️</span>
+              <span>
+                <div className="font-medium">AI 配置</div>
+                <div className="text-xs text-gray-500">配置 API、模型参数</div>
+              </span>
+            </button>
+            <button
+              onClick={onOpenAITuning}
+              disabled={!hasModel}
+              className={`w-full px-4 py-2 text-left text-sm flex items-center gap-2 ${
+                hasModel
+                  ? 'hover:bg-gray-50 text-gray-700'
+                  : 'opacity-50 cursor-not-allowed text-gray-400'
+              }`}
+              title={!hasModel ? '请先导入或创建指标模型' : ''}
+            >
+              <span>🎯</span>
+              <span>
+                <div className="font-medium">AI 调参</div>
+                <div className="text-xs text-gray-500">智能调整驱动因子</div>
+              </span>
+            </button>
+            <button
+              onClick={onOpenKnowledgeBase}
+              className="w-full px-4 py-2 text-left hover:bg-gray-50 text-sm flex items-center gap-2"
+            >
+              <span>📚</span>
+              <span>
+                <div className="font-medium">知识库</div>
+                <div className="text-xs text-gray-500">管理历史案例</div>
+              </span>
+            </button>
+            <div className="border-t my-1" />
+            <button
+              onClick={onOpenScenarioSelector}
+              className="w-full px-4 py-2 text-left hover:bg-gray-50 text-sm flex items-center gap-2"
+            >
+              <span>📋</span>
+              <span>
+                <div className="font-medium">场景选择</div>
+                <div className="text-xs text-gray-500">管理 AI 场景模板</div>
+              </span>
+            </button>
+            </div>
+          </div>
+        </div>
 
-        {/* AI调参按钮 */}
-        <button
-          onClick={onOpenAITuning}
-          className={`shrink-0 px-4 py-2 rounded-lg flex items-center gap-2 font-medium shadow-sm whitespace-nowrap ${
-            showAITuning
-              ? 'bg-gradient-to-r from-blue-600 to-cyan-600 text-white hover:from-blue-700 hover:to-cyan-700'
-              : 'bg-gradient-to-r from-blue-400 to-cyan-400 text-white hover:from-blue-500 hover:to-cyan-500'
-          }`}
-        >
-          <span>🤖</span>
-          <span>AI调参</span>
-        </button>
+        {/* 隐藏单独的知识库按钮，已整合到下拉菜单 */}
       </div>
 
       <div className="flex items-center gap-2">
@@ -157,7 +206,8 @@ const Toolbar = ({
             📋
             示例模型
           </button>
-          <div className="absolute top-full left-0 mt-1 bg-white border rounded-lg shadow-lg py-2 hidden group-hover:block min-w-48 z-50">
+          <div className="absolute top-full left-0 pt-1 bg-transparent min-w-48 z-50">
+            <div className="bg-white border rounded-lg shadow-lg py-2 hidden group-hover:block">
             <button
               onClick={() => onLoadSample('sales')}
               className="w-full px-4 py-2 text-left hover:bg-gray-50 text-sm"
@@ -183,6 +233,7 @@ const Toolbar = ({
             >
               📝 下载公式表模板
             </button>
+            </div>
           </div>
         </div>
 
@@ -208,7 +259,8 @@ const Toolbar = ({
             📤
             导出
           </button>
-          <div className="absolute top-full right-0 mt-1 bg-white border rounded-lg shadow-lg py-2 hidden group-hover:block min-w-40 z-50">
+          <div className="absolute top-full right-0 pt-1 bg-transparent min-w-40 z-50">
+            <div className="bg-white border rounded-lg shadow-lg py-2 hidden group-hover:block">
             <button
               onClick={onExportImage}
               className="w-full px-4 py-2 text-left hover:bg-gray-50 text-sm"
@@ -228,6 +280,7 @@ const Toolbar = ({
             >
               📊 导出 CSV
             </button>
+            </div>
           </div>
         </div>
       </div>

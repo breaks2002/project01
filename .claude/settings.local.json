@@ -9,7 +9,21 @@
       "Bash(npm install:*)",
       "Bash(rm:*)",
       "Bash(node:*)",
-      "Bash(npx eslint:*)"
+      "Bash(npx eslint:*)",
+      "Bash(sed:*)",
+      "Bash(python:*)",
+      "Bash(python3:*)",
+      "Bash(grep:*)",
+      "Bash(/c/Python39/python.exe:*)",
+      "Bash(curl:*)",
+      "Bash(\"E:/MY AI/ValQ/src/utils/add_import.cjs\":*)",
+      "Bash(py:*)",
+      "Bash(sed -i '726,730d' src/utils/aiPromptBuilder.js)",
+      "Bash(sed -i '725a\\\\${targetNodeId \\\\&\\\\& nodes[targetNodeId] ? `\\\\n【目标指标公式】（重要！）\\\\n${nodes[targetNodeId].name} = ${nodes[targetNodeId].formula || \"\"无公式\"\"}\\\\n注意：公式中的系数（如税率、毛利率等）已经内置，计算时必须考虑！` : \"\"\"\"}' src/utils/aiPromptBuilder.js)",
+      "Bash(sed -i 's/3. \\\\*\\\\*差距分析\\\\*\\\\*/4. **差距分析**/g; s/4. \\\\*\\\\*不达标处理\\\\*\\\\*/5. **不达标处理**/g' src/utils/aiPromptBuilder.js)",
+      "Bash(sed -i 's/2. \\\\*\\\\*计算验证\\\\*\\\\*/3. **计算验证**/g' src/utils/aiPromptBuilder.js)",
+      "Read(//tmp/**)",
+      "Bash(src/utils/aiPromptBuilder.js:*)"
     ]
   }
 }

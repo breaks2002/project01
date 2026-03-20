@@ -15,6 +15,8 @@ import AITuningPanel from './components/DataPanel/AITuningPanel';
 import TrendChart from './components/Canvas/TrendChart';
 import WaterfallChart from './components/Canvas/WaterfallChart';
 import NodeTreeList from './components/NodeTreeList/NodeTreeList';
+import KnowledgeBasePanel from './components/KnowledgeBase/KnowledgeBasePanel';
+import ScenarioSelector from './components/KnowledgeBase/ScenarioSelector';
 import { sampleSalesModel, sampleProfitModel } from './examples/sampleModel';
 import html2canvas from 'html2canvas';
 
@@ -77,6 +79,12 @@ function App() {
   const [waterfallChartNodeId, setWaterfallChartNodeId] = useState(null);
   const [showAIConfig, setShowAIConfig] = useState(false);
   const [showAITuning, setShowAITuning] = useState(false);
+  const [showKnowledgeBase, setShowKnowledgeBase] = useState(false);
+  const [showScenarioSelector, setShowScenarioSelector] = useState(false);
+  const [knowledgeBaseZIndex, setKnowledgeBaseZIndex] = useState(57);
+  const [scenarioSelectorZIndex, setScenarioSelectorZIndex] = useState(58);
+  const [selectedScenarios, setSelectedScenarios] = useState([]); // 选中的场景
+  // 选中的知识库不再在 App 状态中管理，由 KnowledgeBasePanel 内部通过 localStorage 处理
   const initializedRef = useRef(false);
   const canvasRef = useRef(null);
   const canvasContainerRef = useRef(null);
@@ -129,9 +137,10 @@ function App() {
       trendChartZIndex,
       waterfallChartZIndex,
       aiConfigZIndex,
-      aiTuningZIndex
+      aiTuningZIndex,
+      knowledgeBaseZIndex
     ];
-  }, [dataPanelZIndex, scenarioCompareZIndex, sensitivityAnalysisZIndex, formulaEditorZIndex, nodeEditorZIndex, nodeTreeListZIndex, stdDevAnalysisZIndex, trendChartZIndex, waterfallChartZIndex, aiConfigZIndex, aiTuningZIndex]);
+  }, [dataPanelZIndex, scenarioCompareZIndex, sensitivityAnalysisZIndex, formulaEditorZIndex, nodeEditorZIndex, nodeTreeListZIndex, stdDevAnalysisZIndex, trendChartZIndex, waterfallChartZIndex, aiConfigZIndex, aiTuningZIndex, knowledgeBaseZIndex]);
 
   const bringDataPanelToFront = useCallback(() => {
     const maxZ = Math.max(...getAllZIndexes()) + 1;
@@ -187,6 +196,59 @@ function App() {
     const maxZ = Math.max(...getAllZIndexes()) + 1;
     setAiTuningZIndex(maxZ);
   }, [getAllZIndexes]);
+
+  const bringKnowledgeBaseToFront = useCallback(() => {
+    const maxZ = Math.max(...getAllZIndexes()) + 1;
+    setKnowledgeBaseZIndex(maxZ);
+  }, [getAllZIndexes]);
+
+  const bringScenarioSelectorToFront = useCallback(() => {
+    const maxZ = Math.max(...getAllZIndexes()) + 1;
+    setScenarioSelectorZIndex(maxZ);
+  }, [getAllZIndexes]);
+
+  const handleSelectScenarios = useCallback((scenarios) => {
+    setSelectedScenarios(scenarios);
+    console.log('[App] 选中的场景:', scenarios);
+  }, []);
+
+  // 暴露全局 setter 函数给 AI 调参面板使用
+  useEffect(() => {
+    window.showScenarioSelectorSetter = setShowScenarioSelector;
+    window.showKnowledgeBaseSetter = setShowKnowledgeBase;
+    return () => {
+      delete window.showScenarioSelectorSetter;
+      delete window.showKnowledgeBaseSetter;
+    };
+  }, []);
+
+  // 初始化时从 localStorage 恢复选中的场景
+  useEffect(() => {
+    console.log('[App] 开始恢复场景选择...');
+    try {
+      const savedScenarioIds = JSON.parse(localStorage.getItem('vdt_prompt_selected_template') || '[]');
+      console.log('[App] localStorage 中的场景 ID:', savedScenarioIds);
+      if (savedScenarioIds && savedScenarioIds.length > 0) {
+        // 延迟读取，等待 promptTemplateService 初始化
+        setTimeout(async () => {
+          console.log('[App] 开始加载场景模板...');
+          const { default: promptTemplateService } = await import('./services/promptTemplateService');
+          await promptTemplateService.initialize();
+          const allTemplates = promptTemplateService.getAllTemplates();
+          console.log('[App] 所有场景模板:', allTemplates.map(t => ({ id: t.id, name: t.name })));
+          const selected = allTemplates.filter(t => savedScenarioIds.includes(t.id));
+          console.log('[App] 恢复选中的场景:', selected);
+          if (selected.length > 0) {
+            setSelectedScenarios(selected);
+          }
+        }, 100);
+      } else {
+        console.log('[App] localStorage 中没有选中的场景');
+      }
+    } catch (err) {
+      console.error('恢复场景选择失败:', err);
+    }
+  }, []);
 
   // 初始化示例模型（仅当 localStorage 没有数据时）
   useEffect(() => {
@@ -447,14 +509,133 @@ function App() {
     setShowEditor(true);
   }, [nodes]);
 
+  // 辅助函数：转义正则表达式特殊字符
+  const escapeRegExp = (string) => {
+    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  };
+
+  // 辅助函数：创建匹配 ID 的正则（支持中文 ID）
+  const createIdRegex = (id) => {
+    const escaped = escapeRegExp(id);
+    // 中文没有单词边界，使用更通用的匹配方式
+    // 匹配：ID 前后不是字母、数字、下划线、中文
+    return new RegExp(`(^|[^a-zA-Z0-9_\u4e00-\u9fa5])${escaped}($|[^a-zA-Z0-9_\u4e00-\u9fa5])`, 'g');
+  };
+
+  // 辅助函数：替换 ID 时保留边界字符
+  const replaceId = (formula, oldId, newId) => {
+    const regex = createIdRegex(oldId);
+    return formula.replace(regex, (match, before, after) => {
+      return before + newId + after;
+    });
+  };
+
   const handleSaveNode = useCallback((newNode) => {
-    if (nodes[newNode.id]) {
-      updateNode(newNode.id, newNode);
-    } else {
+    console.log('🔥🔥🔥 [handleSaveNode] 被调用！', {
+      editingNode: editingNode,
+      editingNodeId: editingNode?.id,
+      newNodeId: newNode.id,
+      newNodeName: newNode.name
+    });
+
+    console.log('[handleSaveNode] 调用 save', {
+      editingNode: editingNode,
+      editingNodeId: editingNode?.id,
+      newNodeId: newNode.id,
+      newNodeName: newNode.name
+    });
+
+    // 如果 ID 发生变化，需要先更新依赖公式，再删除旧节点
+    if (editingNode && editingNode.id && editingNode.id !== newNode.id) {
+      const oldId = editingNode.id;
+      const newId = newNode.id;
+
+      console.log('[handleSaveNode] 检测到 ID 变化:', oldId, '→', newId);
+
+      // 1. 先更新所有依赖该节点的公式（在当前 nodes 状态下查找）
+      const currentNodes = Object.values(nodes);
+      const formulasToUpdate = [];
+
+      console.log('[handleSaveNode] 当前 nodes 数量:', currentNodes.length);
+      console.log('[handleSaveNode] 旧 ID:', oldId);
+
+      currentNodes.forEach(node => {
+        if (node.type === 'computed' && node.formula) {
+          console.log(`[handleSaveNode] 检查公式：${node.name} (${node.id}) - ${node.formula}`);
+
+          // 使用新的替换函数
+          if (node.formula.includes(oldId)) {
+            const newFormula = replaceId(node.formula, oldId, newId);
+            console.log(`[handleSaveNode] 正则匹配：true, 新公式：${newFormula}`);
+            formulasToUpdate.push({ nodeId: node.id, newFormula });
+            console.log(`[handleSaveNode] 待更新公式：${node.name} (${node.id}) - ${node.formula} → ${newFormula}`);
+          } else {
+            console.log(`[handleSaveNode] 正则匹配：false (公式中不包含旧 ID)`);
+          }
+        }
+      });
+
+      console.log('[handleSaveNode] 待更新公式数量:', formulasToUpdate.length);
+
+      // 批量更新公式
+      formulasToUpdate.forEach(({ nodeId, newFormula }) => {
+        updateNode(nodeId, { formula: newFormula });
+      });
+
+      // 2. 删除旧节点，添加新节点
+      console.log('[handleSaveNode] 删除旧节点:', oldId);
+      deleteNode(oldId);
+      console.log('[handleSaveNode] 添加新节点:', newId);
       addNode(newNode);
+
+      console.log('[handleSaveNode] ID 变更完成，已更新', formulasToUpdate.length, '个公式');
+    } else {
+      // ID 未变化，正常更新
+      console.log('[handleSaveNode] ID 未变化，正常更新');
+      if (nodes[newNode.id]) {
+        updateNode(newNode.id, newNode);
+      } else {
+        addNode(newNode);
+      }
     }
     setShowEditor(false);
-  }, [nodes, updateNode, addNode]);
+    setEditingNode(null);
+  }, [nodes, editingNode, updateNode, addNode, deleteNode]);
+
+  // 迁移公式：将所有公式中的 Name 替换为对应节点的 ID
+  const migrateFormulas = useCallback(() => {
+    console.log('[migrateFormulas] 开始迁移公式...');
+
+    Object.values(nodes).forEach(node => {
+      if (node.type === 'computed' && node.formula) {
+        let newFormula = node.formula;
+        let changed = false;
+
+        // 查找所有节点，将公式中的 Name 替换为 ID
+        // 按名称长度降序排序，避免短名称先替换导致长名称匹配失败
+        const sortedNodes = Object.values(nodes).sort((a, b) => b.name.length - a.name.length);
+
+        sortedNodes.forEach(targetNode => {
+          if (targetNode.id && targetNode.name && targetNode.id !== targetNode.name) {
+            // 使用单词边界匹配，避免部分匹配
+            const nameRegex = new RegExp(`\\b${escapeRegExp(targetNode.name)}\\b`, 'g');
+            if (nameRegex.test(newFormula)) {
+              newFormula = newFormula.replace(nameRegex, targetNode.id);
+              changed = true;
+              console.log(`[migrateFormulas] 替换："${targetNode.name}" → "${targetNode.id}"`);
+            }
+          }
+        });
+
+        if (changed) {
+          updateNode(node.id, { formula: newFormula });
+          console.log(`[migrateFormulas] 更新节点 ${node.id} 的公式：${node.formula} → ${newFormula}`);
+        }
+      }
+    });
+
+    console.log('[migrateFormulas] 迁移完成');
+  }, [nodes, updateNode]);
 
   const handleDeleteNode = useCallback((id) => {
     if (window.confirm('确定要删除这个节点吗？')) {
@@ -672,6 +853,8 @@ function App() {
   }, [importModel]);
 
   return (
+    (console.log('💥💥 [APP] RENDER START 💥💥💥 showAITuning=', showAITuning)),
+    (console.log('💥 [APP] 当前时间:', new Date().toLocaleTimeString())),
     <div className="h-screen flex flex-col bg-gray-100">
       <Toolbar
         onOpenEditor={handleOpenEditor}
@@ -720,6 +903,13 @@ function App() {
         showAIConfig={showAIConfig}
         onOpenAITuning={() => setShowAITuning(true)}
         showAITuning={showAITuning}
+        onOpenKnowledgeBase={() => {
+          setShowKnowledgeBase(true);
+        }}
+        showKnowledgeBase={showKnowledgeBase}
+        onOpenScenarioSelector={() => {
+          setShowScenarioSelector(true);
+        }}
       />
 
       {/* 缩放控制栏 */}
@@ -919,6 +1109,7 @@ function App() {
             onClose={() => setShowFormulaEditor(false)}
             isMinimized={isFormulaEditorMinimized}
             onToggleMinimize={() => setIsFormulaEditorMinimized(!isFormulaEditorMinimized)}
+            onMigrateFormulas={migrateFormulas}
             onBringToFront={bringFormulaEditorToFront}
           />
         </div>
@@ -1005,12 +1196,35 @@ function App() {
         </div>
       )}
 
-      {/* AI调参面板 */}
-      {showAITuning && (
-        <div style={{ zIndex: aiTuningZIndex, position: 'relative' }} onClick={bringAITuningToFront}>
+      {/* AI 调参面板 */}
+      {showAITuning && (() => {
+        console.log("[App] 渲染 AITuningPanel, showAITuning=", showAITuning);
+        return (
+        <div style={{ zIndex: aiTuningZIndex, position: "relative" }} onClick={bringAITuningToFront}>
           <AITuningPanel
             onClose={() => setShowAITuning(false)}
             onBringToFront={bringAITuningToFront}
+            selectedScenarios={selectedScenarios}
+          />
+        </div>
+        );
+      })()}
+
+      {/* 知识库面板 */}
+      {showKnowledgeBase && (
+        <div style={{ zIndex: knowledgeBaseZIndex, position: 'relative' }} onClick={bringKnowledgeBaseToFront}>
+          <KnowledgeBasePanel
+            onClose={() => setShowKnowledgeBase(false)}
+          />
+        </div>
+      )}
+
+      {/* 场景选择 */}
+      {showScenarioSelector && (
+        <div style={{ zIndex: scenarioSelectorZIndex, position: 'relative' }} onClick={bringScenarioSelectorToFront}>
+          <ScenarioSelector
+            onClose={() => setShowScenarioSelector(false)}
+            onSelectScenarios={handleSelectScenarios}
           />
         </div>
       )}

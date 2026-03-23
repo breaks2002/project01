@@ -5,14 +5,23 @@ import { buildSmartTuningPrompt, parseAIResponse } from '../../utils/aiPromptBui
 import { extractBusinessContext } from '../../utils/nlUnderstanding';
 import { parseDocument, extractKeyInformation, isSupportedFileType } from '../../utils/DocumentParser';
 import knowledgeService from '../../services/knowledgeService';
-import { fallbackStrategyEngine } from '../../engine/FallbackStrategyEngine';
+import { formatValue } from '../../utils/formatters';
 import { consistencyValidationEngine } from '../../engine/ConsistencyValidationEngine';
 import { executeUnionDecision, convertToAIFORMat } from '../../engine/UnionDecisionEngine';
-import { formatValue } from '../../utils/formatters';
-import { parseConstraints } from '../../utils/constraintParser';
+import { fallbackStrategyEngine } from '../../engine/FallbackStrategyEngine';
 import NodeSelector from './NodeSelector';
 import { TEST_VERSION } from '../../test-version';
-import ConstraintRulePanel from './ConstraintRulePanel';
+import {
+  CONSTRAINT_PATTERNS,
+  ACTION_TYPES,
+  UNIT_TYPES,
+  FACTOR_ALIASES,
+  resolveUnitType,
+  calculateTargetValue,
+  generateConstraintDescription,
+  findCanonicalFactorName,
+  DEFAULT_AI_FALLBACK_CONFIG
+} from '../../utils/constraintPatterns';
 
 // ===== 调试日志：验证代码加载 =====
 console.log('[AITuningPanel] 模块加载成功！DEBUG-20260317-NEW'); console.warn('⚠️️⚠️ DEBUG LOG - 如果看到这个说明代码已加载 ⚠️️⚠️！时间:', new Date().toLocaleTimeString());
@@ -75,8 +84,25 @@ const AITuningPanel = ({ onClose, onBringToFront, selectedScenarios = [] }) => {
   const [error, setError] = useState(null);
   const [showSavePrompt, setShowSavePrompt] = useState(false);
   const [appliedCount, setAppliedCount] = useState(0);
-  const [showRulePanel, setShowRulePanel] = useState(false); // 规则管理面板
-  const [enableAIFallback, setEnableAIFallback] = useState(true); // AI 语义兜底，默认启用
+
+  // 调整模式选择（B+C+D 方案）
+  const [adjustmentMode, setAdjustmentMode] = useState('auto'); // auto|conservative|moderate|aggressive|custom
+  const [customRange, setCustomRange] = useState({ min: -50, max: 50 }); // 自定义范围（百分比）
+  const [enableWarnings, setEnableWarnings] = useState(true); // 启用可行性提示
+  const [expectationConflict, setExpectationConflict] = useState(null); // 预期与约束冲突
+
+  // AI 语义兜底配置（阶段 3）
+  const [enableAIFallback, setEnableAIFallback] = useState(() => {
+    const saved = localStorage.getItem('vdt_ai_fallback_enabled');
+    return saved !== null ? JSON.parse(saved) : DEFAULT_AI_FALLBACK_CONFIG.enabled;
+  });
+  const [aiFallbackTimeout, setAiFallbackTimeout] = useState(DEFAULT_AI_FALLBACK_CONFIG.timeout);
+  const [isAIFallbackLoading, setIsAIFallbackLoading] = useState(false);
+
+  // 保存 AI 兜底配置到 localStorage
+  useEffect(() => {
+    localStorage.setItem('vdt_ai_fallback_enabled', JSON.stringify(enableAIFallback));
+  }, [enableAIFallback]);
 
   // 节点选择状态
   const [nodeSelectorMode, setNodeSelectorMode] = useState('auto');
@@ -124,9 +150,372 @@ const AITuningPanel = ({ onClose, onBringToFront, selectedScenarios = [] }) => {
     setConflictWarnings(warnings);
   }, [businessContext, selectedDrivers, nodeSelectorMode, nodes]);
 
+  // 特殊约束解析结果（从业务背景中提取）
+  const [specialConstraints, setSpecialConstraints] = useState([]);
+  const [constraintParseSource, setConstraintParseSource] = useState('none');
+
+// 预期与约束冲突检测（重构版 - 基于特殊约束解析）
+  useEffect(() => {
+    if (!enableWarnings || (adjustmentMode === 'manual' && !businessContext)) {
+      setExpectationConflict(null);
+      return;
+    }
+
+    // 从特殊约束中提取与目标指标相关的约束
+    const extractExpectationFromConstraints = () => {
+      // 查找有目标值的计算指标
+      const targetNodes = Object.values(nodes).filter(n =>
+        n.type === 'computed' && n.targetValue !== null && n.targetValue !== undefined
+      );
+
+      // 在特殊约束中查找与目标指标相关的约束
+      for (const node of targetNodes) {
+        const constraint = specialConstraints.find(c =>
+          c.factorName === node.name ||
+          c.matchedName === node.name ||
+          (FACTOR_ALIASES[node.name] || []).includes(c.matchedName)
+        );
+
+        if (constraint) {
+          // 根据约束计算目标值
+          const { targetValue, changePercent } = calculateTargetValue(
+            node.value || 0,
+            constraint.value,
+            constraint.unitType
+          );
+
+          console.log('[预期冲突检测] 基于约束计算目标值:', {
+            factor: node.name,
+            currentValue: node.value,
+            constraintValue: constraint.value,
+            unitType: constraint.unitType,
+            targetValue: targetValue,
+            changePercent: changePercent
+          });
+
+          return {
+            value: targetValue,
+            node: node,
+            constraint: constraint,
+            changePercent: changePercent
+          };
+        }
+      }
+
+      return null;
+    };
+
+    const expectationResult = extractExpectationFromConstraints();
+
+    if (!expectationResult) {
+      setExpectationConflict(null);
+      return;
+    }
+
+    const expectedValue = expectationResult.value;
+    const currentNode = expectationResult.node;
+    const currentValue = currentNode?.value ?? 0;
+    const requiredChangePercent = expectationResult.changePercent;
+
+    // 计算允许的约束范围
+    const getAllowedRange = () => {
+      if (adjustmentMode === 'auto') {
+        return { min: -0.30, max: 0.30 };
+      }
+
+      const presetRanges = {
+        conservative: 0.10,  // ±10%
+        moderate: 0.30,      // ±30%
+        aggressive: 0.50     // ±50%
+      };
+
+      if (adjustmentMode === 'custom') {
+        return {
+          min: customRange.min / 100,
+          max: customRange.max / 100
+        };
+      }
+
+      const range = presetRanges[adjustmentMode] || 0.30;
+      return { min: -range, max: range };
+    };
+
+    const allowedRange = getAllowedRange();
+    if (!allowedRange) {
+      setExpectationConflict(null);
+      return;
+    }
+
+    const maxAllowed = Math.max(Math.abs(allowedRange.min), allowedRange.max);
+
+    console.log('[预期冲突检测 - 重构版] 预期值:', expectedValue, '当前值:', currentValue, '需要增幅:', requiredChangePercent, '允许范围:', maxAllowed);
+
+    // 检测冲突
+    if (Math.abs(requiredChangePercent) > maxAllowed) {
+      setExpectationConflict({
+        type: 'expectation_constraint_mismatch',
+        expectation: expectedValue,
+        currentValue: currentValue,
+        targetValue: currentNode?.targetValue,
+        requiredGap: Math.round(requiredChangePercent * 100),
+        allowedRange: allowedRange,
+        feasibleRange: {
+          min: Math.round(currentValue * (1 + allowedRange.min)),
+          max: Math.round(currentValue * (1 + allowedRange.max))
+        },
+        constraint: expectationResult.constraint,
+        message: `预期需要${Math.round(requiredChangePercent * 100)}%增长，但当前约束仅允许${Math.round(maxAllowed * 100)}%`,
+        suggestions: [
+          `切换到"进取型"可达成${expectedValue}万预期`,
+          `或调整预期为${Math.round(currentValue * 1.1)}万 - ${Math.round(currentValue * (1 + maxAllowed))}万（可行范围内）`
+        ]
+      });
+    } else {
+      setExpectationConflict(null);
+    }
+  }, [businessContext, adjustmentMode, customRange, enableWarnings, nodes, specialConstraints]);
+
   // 知识库选中状态
   const [selectedKnowledgeEntries, setSelectedKnowledgeEntries] = useState([]);
   const [restoredScenarios, setRestoredScenarios] = useState([]); // 从 localStorage 恢复的场景
+
+   // 'rule' | 'ai' | 'none' | 'empty'
+
+  /**
+   * 从业务背景中解析特殊约束（B+C+D 方案扩展）
+   * 支持用户通过自然语言指定特殊约束
+   */
+  const parseSpecialConstraints = useCallback((context) => {
+    if (!context) return [];
+
+    const constraints = [];
+    const driverNodes = Object.values(nodes).filter(n => n.type === 'driver');
+
+    console.log('[特殊约束解析] 开始解析，context:', context, 'driverNodes:', driverNodes.map(n => n.name));
+
+    // 遍历所有驱动因子，检查是否有特殊约束
+    driverNodes.forEach(node => {
+      const nodeName = node.name;
+      console.log('[特殊约束解析] 检查因子:', nodeName);
+
+      // 1. "允许...超出/超过 X%"或"允许...超出 X 万"
+      // 支持两种顺序："管理费用允许超出 10%"和"允许管理费用超出 10%"
+      // 支持百分比、百分点、绝对额三种格式
+      // 支持符号：>, <, =, ≥, ≤等
+      const exceedPatterns = [
+        // 因子在前：管理费用允许超出 10%
+        new RegExp(nodeName + '.*?[允许可可以].*?[超超出支预算].*?(\\d+(?:\\.\\d+)?)\\s*(%|万 | 万元 | 个百分点)?', 'i'),
+        // 允许在前：允许管理费用超出 10%
+        new RegExp('[允许可可以].*?' + nodeName + '.*?[超超出支预算].*?(\\d+(?:\\.\\d+)?)\\s*(%|万 | 万元 | 个百分点)?', 'i'),
+        // 符号格式：管理费用>100 万 或 管理费用≥100 万
+        new RegExp(nodeName + '\\s*[>≥].*?(\\d+(?:\\.\\d+)?)\\s*(万 | 万元 | 元 | 百万 | 亿)?', 'i')
+      ];
+
+      for (const pattern of exceedPatterns) {
+        const exceedMatch = context.match(pattern);
+        console.log('[特殊约束解析] 超出匹配:', exceedMatch);
+        if (exceedMatch && exceedMatch[1]) {
+          const value = parseFloat(exceedMatch[1]);
+          const unit = (exceedMatch[2] && exceedMatch[2].trim()) ? exceedMatch[2].trim() : '%';
+          const isPercent = unit === '%';
+          const isPercentagePoint = unit === '个百分点';
+
+          constraints.push({
+            factorId: node.id,
+            factorName: nodeName,
+            type: 'max_override',
+            value: value,
+            isPercent: isPercent,
+            isPercentagePoint: isPercentagePoint,
+            unit: unit,
+            description: isPercent
+              ? `允许${nodeName}超出目标${value}%`
+              : isPercentagePoint
+                ? `允许${nodeName}超出目标${value}个百分点`
+                : `允许${nodeName}超出目标${value}${unit}`,
+            constraint: isPercent || isPercentagePoint
+              ? { max: value / 100 }
+              : { maxValue: value }
+          });
+          break; // 匹配到一个后跳出
+        }
+      }
+
+      // 1b. "控制在...以内"、"不超过 X%"或"不超过 X 万"
+      const controlPatterns = [
+        new RegExp(nodeName + '.*?(控制在 | 不超过 | 最多 | 至多 | 不大于 | 不高于).*?(\d+(?:\.\d+)?)\s*(%|万 | 万元 | 元 | 个百分点)?', 'i'),
+        new RegExp('(控制在 | 不超过 | 最多 | 至多 | 不大于 | 不高于).*?' + nodeName + '.*?(\d+(?:\.\d+)?)\s*(%|万 | 万元 | 元 | 个百分点)?', 'i'),
+        new RegExp(nodeName + '\s*[≤<].*?(\d+(?:\.\d+)?)\s*(万 | 万元 | 元 | 百万 | 亿)?', 'i')
+      ];
+      for (const pattern of controlPatterns) {
+        const maxMatch = context.match(pattern);
+        console.log('[特殊约束解析] 最大值匹配:', maxMatch);
+        if (maxMatch && maxMatch[2]) {
+          const value = parseFloat(maxMatch[2]);
+          const unit = (maxMatch[3] && maxMatch[3].trim()) ? maxMatch[3].trim() : '%';
+          const isPercent = unit === '%';
+          const isPercentagePoint = unit === '个百分点';
+          constraints.push({
+            factorId: node.id,
+            factorName: nodeName,
+            type: 'max_limit',
+            value: value,
+            isPercent: isPercent,
+            isPercentagePoint: isPercentagePoint,
+            unit: unit,
+            description: isPercent ? `${nodeName}不超过${value}%` : isPercentagePoint ? `${nodeName}不超过${value}个百分点` : `${nodeName}不超过${value}${unit}`,
+            constraint: isPercent || isPercentagePoint ? { max: value / 100 } : { maxValue: value }
+          });
+          break;
+        }
+      }
+
+      // 2. "...必须降低/减少 X% 以上"或"降低 X 万"
+      const reducePatterns = [
+        new RegExp(nodeName + '.*?(必须 | 需要 | 力争 | 力求).*?[减降] 低.*?(\d+(?:\.\d+)?)\s*(%|万 | 万元 | 个百分点)?', 'i'),
+        new RegExp('(必须 | 需要 | 力争 | 力求).*?' + nodeName + '.*?[减降] 低.*?(\d+(?:\.\d+)?)\s*(%|万 | 万元 | 个百分点)?', 'i'),
+        new RegExp(nodeName + '\s*[<≤].*?(\d+(?:\.\d+)?)\s*(万 | 万元 | 元 | 百万 | 亿)?', 'i')
+      ];
+      for (const pattern of reducePatterns) {
+        const reduceMatch = context.match(pattern);
+        console.log('[特殊约束解析] 降低匹配:', reduceMatch);
+        if (reduceMatch && reduceMatch[2]) {
+          const value = parseFloat(reduceMatch[2]);
+          const unit = (reduceMatch[3] && reduceMatch[3].trim()) ? reduceMatch[3].trim() : '%';
+          const isPercent = unit === '%';
+          const isPercentagePoint = unit === '个百分点';
+          constraints.push({
+            factorId: node.id,
+            factorName: nodeName,
+            type: 'min_force',
+            value: value,
+            isPercent: isPercent,
+            isPercentagePoint: isPercentagePoint,
+            unit: unit,
+            description: isPercent ? `${nodeName}必须降低${value}%` : isPercentagePoint ? `${nodeName}必须降低${value}个百分点` : `${nodeName}必须降低${value}${unit}`,
+            constraint: isPercent || isPercentagePoint ? { min: -value / 100 } : { minValue: value }
+          });
+          break;
+        }
+      }
+
+      // 3. "允许在±X% 范围内调整"
+      const rangeMatch = context.match(new RegExp(`${nodeName}[允许可以]?[在±]?(\d+(?:\\.\d+)?)\s*%[范内]?围 [内中]?调 [整节]`));
+      if (rangeMatch) {
+        const percent = parseFloat(rangeMatch[1]) / 100;
+        constraints.push({
+          factorId: node.id,
+          factorName: nodeName,
+          type: 'custom_range',
+          value: rangeMatch[1],
+          description: `允许${nodeName}在±${rangeMatch[1]}% 范围内调整`,
+          constraint: { min: -percent, max: percent }
+        });
+      }
+
+      // 4. "...控制在 X 万以内"
+      const maxAbsMatch = context.match(new RegExp(`${nodeName}[控制保]?[持在]?\s*(\d+(?:\\.\d+)?)\s*万 [以内下]`));
+      if (maxAbsMatch) {
+        constraints.push({
+          factorId: node.id,
+          factorName: nodeName,
+          type: 'absolute_max',
+          value: parseFloat(maxAbsMatch[1]),
+          description: `${nodeName}控制在${maxAbsMatch[1]}万以内`,
+          constraint: { maxValue: parseFloat(maxAbsMatch[1]) }
+        });
+      }
+
+      // 5. "...至少达到 X 万"
+      const minAbsMatch = context.match(new RegExp(`${nodeName}[至少最]?[达至]?\s*(\d+(?:\\.\d+)?)\s*万`));
+      if (minAbsMatch) {
+        constraints.push({
+          factorId: node.id,
+          factorName: nodeName,
+          type: 'absolute_min',
+          value: parseFloat(minAbsMatch[1]),
+          description: `${nodeName}至少达到${minAbsMatch[1]}万`,
+          constraint: { minValue: parseFloat(minAbsMatch[1]) }
+        });
+      }
+
+      // 6. "不惜代价削减..."
+      const anyCostMatch = context.match(new RegExp(`[不惜无论] 代价 [削减] 少 ?${nodeName}`));
+      if (anyCostMatch) {
+        constraints.push({
+          factorId: node.id,
+          factorName: nodeName,
+          type: 'no_limit',
+          description: `不惜代价削减${nodeName}`,
+          constraint: { min: -1, max: 0 }  // 只允许降低，无下限
+        });
+      }
+
+      // 7. "尽量保持...稳定"
+      const stableMatch = context.match(new RegExp(`[尽量尽] 可能?保持${nodeName}[稳稳]?定`));
+      if (stableMatch) {
+        constraints.push({
+          factorId: node.id,
+          factorName: nodeName,
+          type: 'stable',
+          description: `尽量保持${nodeName}稳定`,
+          constraint: { min: -0.05, max: 0.05 }  // ±5%
+        });
+      }
+    });
+
+    // 8. 全局约束（不针对特定因子）
+    // "所有费用必须降低 X%"
+    const globalReduce = context.match(/所有费用必须 [减降] 低 [至到]?(\d+(?:\\.\d+)?)\s*%/);
+    if (globalReduce) {
+      const expenseNodes = driverNodes.filter(n => /费用|成本|支出/i.test(n.name));
+      expenseNodes.forEach(node => {
+        constraints.push({
+          factorId: node.id,
+          factorName: node.name,
+          type: 'global_reduce',
+          value: -parseFloat(globalReduce[1]),
+          description: `所有费用必须降低${globalReduce[1]}%`,
+          constraint: { min: -parseFloat(globalReduce[1]) / 100 }
+        });
+      });
+    }
+
+    return constraints;
+  }, [nodes]);
+
+  // 当业务背景变化时，解析特殊约束（重构版）
+  useEffect(() => {
+    const constraints = parseSpecialConstraints(businessContext);
+
+    // 兼容旧版本返回数组和新版本返回对象
+    if (Array.isArray(constraints)) {
+      setSpecialConstraints(constraints);
+      setConstraintParseSource(constraints.length > 0 ? 'rule' : 'none');
+    } else if (constraints && typeof constraints === 'object') {
+      // Promise 或对象
+      if (typeof constraints.then === 'function') {
+        // Promise
+        constraints.then(result => {
+          if (Array.isArray(result)) {
+            setSpecialConstraints(result);
+            setConstraintParseSource(result.length > 0 ? 'rule' : 'none');
+          } else {
+            setSpecialConstraints(result?.constraints || []);
+            setConstraintParseSource(result?.source || 'none');
+          }
+        });
+      } else {
+        // 对象
+        setSpecialConstraints(constraints.constraints || []);
+        setConstraintParseSource(constraints.source || 'none');
+      }
+    }
+
+    if ((Array.isArray(constraints) ? constraints : constraints?.constraints || []).length > 0) {
+      console.log('[特殊约束] 解析到约束:', constraints);
+    }
+  }, [businessContext, nodes, parseSpecialConstraints]);
 
   // 读取 localStorage 中的知识库选中状态
   const loadSelectedKnowledge = useCallback(() => {
@@ -307,19 +696,19 @@ const AITuningPanel = ({ onClose, onBringToFront, selectedScenarios = [] }) => {
     const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\\\$&');
     const metricPattern = uniqueMetricNames.length > 0
       ? '(' + uniqueMetricNames.map(escapeRegex).join('|') + ')'
-      : '(净利润 | 营业利润 | 利润总额 | 毛利 | 净利 | 利润 | 收入 | 成本 | 费用)'; // 兜底模式
+      : '(净利润|营业利润|利润总额|毛利|净利|利润|收入|成本|费用)'; // 兜底模式
 
     const targetPatterns = [
       // 模式 1: 指标名 + 达到 + 数字 + 万（允许左右/以上/以下等后缀）
-      new RegExp(metricPattern + '.*?达到.*?([\\d.]+)\\s*万', 'i'),
+      new RegExp(metricPattern + '.*?达到.*?([\\d.]+)\s*万', 'i'),
       // 模式 2: 指标名 + 目标 + 数字 + 万
-      new RegExp(metricPattern + '.*?目标.*?([\\d.]+)\\s*万', 'i'),
+      new RegExp(metricPattern + '.*?目标.*?([\\d.]+)\s*万', 'i'),
       // 模式 3: 目标 + 指标名 + 数字 + 万
-      new RegExp('目标.*?' + metricPattern + '.*?([\\d.]+)\\s*万', 'i'),
+      new RegExp('目标.*?' + metricPattern + '.*?([\\d.]+)\s*万', 'i'),
       // 模式 4: 实现 + 指标名 + 数字 + 万
-      new RegExp('实现.*?' + metricPattern + '.*?([\\d.]+)\\s*万', 'i'),
+      new RegExp('实现.*?' + metricPattern + '.*?([\\d.]+)\s*万', 'i'),
       // 模式 5: 数字 + 万 + 指标名（如"达到 350 万净利润"）
-      new RegExp('([\\d.]+)\\s*万.*?' + metricPattern, 'i'),
+      new RegExp('([\\d.]+)\s*万.*?' + metricPattern, 'i'),
       // 模式 6: 指标名 + 达到 + 数字（不要求万字，允许"350 左右"）
       new RegExp(metricPattern + '.*?达到.*?([\\d.]+)', 'i'),
       // 模式 7: 指标名 + 目标 + 数字
@@ -358,11 +747,11 @@ const AITuningPanel = ({ onClose, onBringToFront, selectedScenarios = [] }) => {
       // 使用动态指标名称构建正则
       const expMetricPattern = uniqueMetricNames.length > 0
         ? '(' + uniqueMetricNames.join('|') + ')'
-        : '(?:净利润 | 营业利润 | 利润总额 | 毛利)';
+        : '(?:净利润|营业利润|利润总额|毛利)';
 
       const explanationPatterns = [
-        new RegExp(expMetricPattern + '.*?([\\d.]+)\\s*万', 'i'),
-        new RegExp('目标.*?([\\d.]+)\\s*万', 'i'),
+        new RegExp(expMetricPattern + '.*?([\\d.]+)\s*万', 'i'),
+        new RegExp('目标.*?([\\d.]+)\s*万', 'i'),
       ];
       for (const expPattern of explanationPatterns) {
         const expMatch = aiResult.explanation.match(expPattern);
@@ -529,8 +918,7 @@ const AITuningPanel = ({ onClose, onBringToFront, selectedScenarios = [] }) => {
     }
 
     // 6. 对比目标
-    const gap = expectedValue - targetValue;  // 正值表示超出目标，负值表示未达目标
-    const changePercent = Math.abs(expectedValue) !== 0 ? (expectedValue - targetValue) / Math.abs(targetValue) : 0;  // 相对于目标的百分比变化
+    const gap = expectedValue - targetValue;
     const status = gap >= 0 ? '达标' : '未达标';
 
     // 7. 获取目标节点的格式设置
@@ -539,7 +927,6 @@ const AITuningPanel = ({ onClose, onBringToFront, selectedScenarios = [] }) => {
     const formattedExpected = formatValue(expectedValue, targetNodeFormat, targetNodeUnit);
     const formattedTarget = formatValue(targetValue, targetNodeFormat, targetNodeUnit);
     const formattedGap = formatValue(Math.abs(gap), targetNodeFormat, targetNodeUnit);
-    const formattedChangePercent = (changePercent * 100).toFixed(1) + '%';
 
     // 8. 构建验证结果
     const validationResult = {
@@ -548,11 +935,10 @@ const AITuningPanel = ({ onClose, onBringToFront, selectedScenarios = [] }) => {
       metricName: targetMetricName,
       currentValue: expectedValue,
       recommendedValue: targetValue,
-      changePercent: changePercent,
+      changePercent: 0,
       formattedValue: formattedExpected,
       formattedTarget: formattedTarget,
       formattedGap: formattedGap,
-      formattedChangePercent: formattedChangePercent,
       gap: gap,
       unit: targetNodeUnit,
       changeReason: '预期' + targetMetricName + formattedExpected + '，目标' + formattedTarget + '，' + (gap >= 0 ? '超出' : '差距') + formattedGap,
@@ -798,26 +1184,6 @@ const AITuningPanel = ({ onClose, onBringToFront, selectedScenarios = [] }) => {
         consistencyResult = null;
       }
 
-      // 步骤 1.6：特殊约束解析（新增）- 使用规则引擎解析用户约束
-      let specialConstraints = [];
-      try {
-        console.log('[特殊约束解析] 开始解析业务背景中的约束...');
-        // 传递所有节点（包括计算指标），因为用户可能说"毛利率增加 5%"
-        const allNodes = Object.values(nodes);
-        const constraintResult = await parseConstraints(
-          businessContext,
-          allNodes,
-          aiConfig,
-          enableAIFallback, // 使用用户配置的 AI 兜底开关
-          callAI
-        );
-        specialConstraints = constraintResult.constraints;
-        console.log('[特殊约束解析] 解析完成，约束数量:', specialConstraints.length, '来源:', constraintResult.source);
-      } catch (err) {
-        console.warn('[特殊约束解析] 失败:', err);
-        specialConstraints = [];
-      }
-
       // 步骤 2：构建 AI Prompt（使用 aiPromptBuilder.js 中的 buildSmartTuningPrompt）
       // 这个函数包含完整的 System Prompt 和输出格式要求（多因子强制、详细推理过程等）
 
@@ -835,8 +1201,11 @@ const AITuningPanel = ({ onClose, onBringToFront, selectedScenarios = [] }) => {
         selectedMetrics: nodeSelectorMode === 'manual' ? selectedMetrics : [],
         selectedDrivers: nodeSelectorMode === 'manual' ? selectedDrivers : [],
         nodeSelectorMode: nodeSelectorMode,
-        enableAIFallback: enableAIFallback, // 传递 AI 语义兜底开关
-        specialConstraints: specialConstraints // 传递特殊约束（规则引擎解析结果）
+        // 特殊约束（B+C+D 方案）
+        specialConstraints: specialConstraints,
+        // 调整模式选择（B+C+D 方案）
+        adjustmentMode: adjustmentMode,
+        customRange: customRange
       });
 
       console.log('[AI 调参] Prompt 构建完成，system 长度:', prompt.system?.length);
@@ -860,91 +1229,89 @@ const AITuningPanel = ({ onClose, onBringToFront, selectedScenarios = [] }) => {
       // 初始化 finalData
       let finalData = parsed.data;
 
-      // 检查 AI 返回的数据是否足够
-      const aiAdjustments = finalData.adjustments || finalData.recommendations || [];
+      // 始终使用并集决策引擎融合 AI 建议、知识库和兜底策略
+      console.log('[并集决策] 开始融合 AI 建议、知识库和兜底策略...');
 
-      // 如果 AI 返回的 adjustments 不足 2 个，触发并集决策引擎融合知识库和兜底策略
-      if (aiAdjustments.length < 2) {
-        console.log('⚠️ AI 返回的调整方案不足 2 个，触发并集决策引擎...');
+      // 根据用户选择的模式决定兜底范围
+      let driverIds = null;
+      if (nodeSelectorMode === 'manual' && selectedDrivers.length > 0) {
+        // 用户指定了范围，只兜底这些因子
+        driverIds = selectedDrivers;
+        console.log('[兜底策略] 用户指定范围，只兜底:', driverIds);
+      }
 
-        // 根据用户选择的模式决定兜底范围
-        let driverIds = null;
-        if (nodeSelectorMode === 'manual' && selectedDrivers.length > 0) {
-          // 用户指定了范围，只兜底这些因子
-          driverIds = selectedDrivers;
-          console.log('[兜底策略] 用户指定范围，只兜底:', driverIds);
-        }
+      // 执行兜底策略
+      const fallbackResult = fallbackStrategyEngine.execute({
+        nodes,
+        positiveTopN: 5,
+        negativeTopN: 5,
+        driverIds: driverIds
+      });
 
-        const fallbackResult = fallbackStrategyEngine.execute({
-          nodes,
-          positiveTopN: 5,
-          negativeTopN: 5,
-          driverIds: driverIds // 新增参数，限制兜底范围
-        });
+      // 将 AI 建议转换为决策引擎格式
+      const aiCandidates = (finalData.adjustments || finalData.recommendations || []).map(adj => ({
+        ...adj,
+        source: 'ai',
+        aiData: adj
+      }));
 
-        if (fallbackResult.success && fallbackResult.allAdjustments.length > 0) {
-          // 使用并集决策引擎融合知识库和兜底策略
-          console.log('[并集决策] 开始融合知识库和兜底策略...');
-
-          // 将知识库结果转换为决策引擎格式
-          const knowledgeCandidates = knowledgeResults.map(k => {
-            // 尝试从 factors 中获取 nodeId，或者用 title 匹配节点
-            let nodeId = k.factors?.[0]?.factorId || k.factors?.[0]?.id;
-            if (!nodeId) {
-              // 尝试用标题匹配节点名称
-              const matchedNode = Object.values(nodes).find(n =>
-                n.name === k.title || n.name?.includes(k.title) || k.title?.includes(n.name)
-              );
-              if (matchedNode) nodeId = matchedNode.id;
-            }
-
-            return {
-              nodeId,
-              nodeName: k.title,
-              currentValue: 0, // 知识库条目没有当前值
-              recommendedValue: 0,
-              changePercent: 0,
-              changeReason: `知识库案例：${k.title}`,
-              dataBasis: `历史经验：${k.scenario || '未指定'}`,
-              businessReason: k.description || '基于历史案例',
-              confidence: k.similarity || 0.6,
-              similarity: k.similarity,
-              source: 'knowledge',
-              raw: k
-            };
-          }).filter(k => k.nodeId); // 过滤掉没有 nodeId 的条目
-
-          console.log('[并集决策] 知识库候选:', knowledgeCandidates.length, '个，兜底候选:', fallbackResult.allAdjustments.length, '个');
-
-          // 执行并集决策
-          const unionResult = executeUnionDecision(
-            knowledgeCandidates,
-            fallbackResult.allAdjustments,
-            {
-              maxFactors: 5,
-              knowledgeBaseWeight: 0.7,
-              fallbackWeight: 0.3,
-              crossBoost: 1.1,
-              minPriorityThreshold: 0.5
-            }
+      // 将知识库结果转换为决策引擎格式
+      const knowledgeCandidates = knowledgeResults.map(k => {
+        let nodeId = k.factors?.[0]?.factorId || k.factors?.[0]?.id;
+        if (!nodeId) {
+          const matchedNode = Object.values(nodes).find(n =>
+            n.name === k.title || n.name?.includes(k.title) || k.title?.includes(n.name)
           );
-
-          console.log('[并集决策] 决策完成:', unionResult.summary);
-
-          // 转换为 AI 格式
-          const fusedAdjustments = convertToAIFORMat(unionResult);
-
-          if (fusedAdjustments.length > 0) {
-            console.log('并集决策生成成功，共', fusedAdjustments.length, '个调整方案');
-            finalData = {
-              ...finalData,
-              adjustments: fusedAdjustments,
-              recommendations: fusedAdjustments,
-              _unionDecisionUsed: true,
-              _unionDecisionMetadata: unionResult
-            };
-          }
+          if (matchedNode) nodeId = matchedNode.id;
         }
+
+        return {
+          nodeId,
+          nodeName: k.title,
+          currentValue: 0,
+          recommendedValue: 0,
+          changePercent: 0,
+          changeReason: `知识库案例：${k.title}`,
+          dataBasis: `历史经验：${k.scenario || '未指定'}`,
+          businessReason: k.description || '基于历史案例',
+          confidence: k.similarity || 0.6,
+          similarity: k.similarity,
+          source: 'knowledge',
+          raw: k
+        };
+      }).filter(k => k.nodeId);
+
+      console.log('[并集决策] AI 建议:', aiCandidates.length, '个，知识库候选:', knowledgeCandidates.length, '个，兜底候选:', fallbackResult.allAdjustments.length, '个');
+
+      // 执行并集决策（三重融合）
+      const unionResult = executeUnionDecision(
+        aiCandidates,
+        knowledgeCandidates,
+        fallbackResult.allAdjustments,
+        {
+          maxFactors: 5,
+          aiWeight: 0.5,
+          knowledgeBaseWeight: 0.35,
+          fallbackWeight: 0.15,
+          crossBoost: 1.15,
+          minPriorityThreshold: 0.3
+        }
+      );
+
+      console.log('[并集决策] 决策完成:', unionResult.summary);
+
+      // 转换为 AI 格式
+      const fusedAdjustments = convertToAIFORMat(unionResult);
+
+      if (fusedAdjustments.length > 0) {
+        console.log('并集决策生成成功，共', fusedAdjustments.length, '个调整方案');
+        finalData = {
+          ...finalData,
+          adjustments: fusedAdjustments,
+          recommendations: fusedAdjustments,
+          _unionDecisionUsed: true,
+          _unionDecisionMetadata: unionResult
+        };
       }
 
       // 如果数据被截断（缺少 expectedImpact 或 explanation），发起第二次请求补充
@@ -956,6 +1323,8 @@ const AITuningPanel = ({ onClose, onBringToFront, selectedScenarios = [] }) => {
       // 修正 expectedImpact.keyMetrics 中的数据（使用实际模型数据）
       if (finalData.expectedImpact && finalData.expectedImpact.keyMetrics) {
         console.log('[AI 调参] 修正 keyMetrics 数据...');
+        console.log('[AI 调参] expectedImpact:', finalData.expectedImpact);
+        console.log('[AI 调参] sensitivityScenario:', finalData.expectedImpact.sensitivityScenario);
 
         // 先计算调整后的指标值
         const adjustments = finalData.adjustments || finalData.recommendations || [];
@@ -1043,12 +1412,19 @@ const AITuningPanel = ({ onClose, onBringToFront, selectedScenarios = [] }) => {
               console.log('[AI 调参] 使用 AI 返回的预期值:', metric.name, '=', expectedValue);
             }
 
+            // 计算变化百分比
+            const beforeVal = actualNode.value ?? metric.before;
+            const afterVal = expectedValue;
+            const changePercent = beforeVal !== 0 ? ((afterVal - beforeVal) / beforeVal) * 100 : 0;
+            const changeStr = (changePercent > 0 ? '+' : '') + changePercent.toFixed(2) + '%';
+
             return {
               ...metric,
               name: actualNode.name, // 使用实际的指标名称
-              before: actualNode.value ?? metric.before, // 使用实际当前值
+              before: beforeVal, // 使用实际当前值
               target: actualNode.targetValue ?? metric.target, // 使用实际目标值
-              after: expectedValue // 使用计算后的预期值
+              after: afterVal, // 使用计算后的预期值
+              change: changeStr // 动态计算变化百分比
             };
           }
 
@@ -1129,25 +1505,35 @@ const AITuningPanel = ({ onClose, onBringToFront, selectedScenarios = [] }) => {
               }
             }
 
+            // 计算变化百分比
+            const beforeVal = computedNode.value ?? metric.before;
+            const afterVal = expectedValue;
+            const changePercent = beforeVal !== 0 ? ((afterVal - beforeVal) / beforeVal) * 100 : 0;
+            const changeStr = (changePercent > 0 ? '+' : '') + changePercent.toFixed(2) + '%';
+
             return {
               ...metric,
               name: computedNode.name,
-              before: computedNode.value ?? metric.before,
+              before: beforeVal,
               target: computedNode.targetValue ?? metric.target,
-              after: expectedValue
+              after: afterVal,
+              change: changeStr // 动态计算变化百分比
             };
           }
 
           // 都找不到，返回原数据（但记录警告）
           console.warn('[AI 调参] 无法匹配模型数据，使用 AI 生成的指标:', metric.name);
+          // 但也需要动态计算 change
+          if (metric.before && metric.after) {
+            const changePercent = metric.before !== 0 ? ((metric.after - metric.before) / metric.before) * 100 : 0;
+            metric.change = (changePercent > 0 ? '+' : '') + changePercent.toFixed(2) + '%';
+          }
           return metric;
         });
         console.log('[AI 调参] 修正后的 keyMetrics:', finalData.expectedImpact.keyMetrics);
       }
 
       // 等待所有数据完成后再更新 UI
-      // 添加规则引擎解析的约束（用于显示，替代 AI 返回的可能不准确的约束）
-      finalData.ruleConstraints = specialConstraints || [];
       setAiResult(finalData);
       // 调试：打印 AI 返回的完整数据结构
       console.log('[AI 调参] AI 返回的完整数据:', JSON.stringify(finalData, null, 2));
@@ -1228,7 +1614,7 @@ ${businessContext}
       {"factor": "因子名称", "impact": "high|medium|low", "correlation": "positive|negative", "elasticity": 数值}
     ],
     "risks": [
-      {"factor": "因子名称", "riskLevel": "高 | 中|低", "description": "风险描述", "recommendation": "建议"}
+      {"factor": "因子名称", "riskLevel": "高|中|低", "description": "风险描述", "recommendation": "建议"}
     ]
   },
   "expectedImpact": {
@@ -1236,9 +1622,9 @@ ${businessContext}
       {"name": "净利润", "before": 数值，"after": 数值，"change": "+XX%", "probability": "XX%"}
     ],
     "sensitivityScenario": [
-      {"scenario": "乐观", "result": 数值，"assumption": "假设说明"},
-      {"scenario": "基准", "result": 数值，"assumption": "假设说明"},
-      {"scenario": "悲观", "result": 数值，"assumption": "假设说明"}
+      {"scenario": "乐观", "profit": 数值，"assumption": "假设说明"},
+      {"scenario": "基准", "profit": 数值，"assumption": "假设说明"},
+      {"scenario": "悲观", "profit": 数值，"assumption": "假设说明"}
     ],
     "summary": "整体影响说明"
   },
@@ -1312,13 +1698,11 @@ ${businessContext}
           console.log('🔄 无 adjustmentDetails，检查是否是第一次请求直接返回的数据');
         }
 
-        // 合并数据
+        // 合并数据（注意：expectedImpact 和 dataAnalysis 已经在第一次请求中返回，不需要合并）
         const mergedData = {
           ...partialData,
           adjustments: mergedAdjustments,
           recommendations: mergedAdjustments,
-          dataAnalysis: supplementParsed.data.dataAnalysis || partialData.dataAnalysis,
-          expectedImpact: supplementParsed.data.expectedImpact || partialData.expectedImpact,
           explanation: supplementParsed.data.explanation || partialData.explanation,
           _supplemented: true
         };
@@ -2285,6 +2669,20 @@ ${businessContext}
             className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 text-sm resize-none"
           />
 
+          {/* 快捷提示 */}
+          <div className="flex gap-2 mt-2">
+            {['Q4旺季冲刺', '控制成本', '提升利润'].map((tip) => (
+              <button
+                key={tip}
+                onClick={() => setBusinessContext(prev =>
+                  prev ? `${prev}\n${tip}：` : `${tip}：`
+                )}
+                className="px-2 py-1 text-xs bg-gray-100 hover:bg-gray-200 text-gray-600 rounded transition-colors"
+              >
+                + {tip}
+              </button>
+            ))}
+          </div>
 
           {/* 文档上传 */}
           <div className="mt-3">
@@ -2342,6 +2740,242 @@ ${businessContext}
 
           {/* 节点选择器 */}
           <div className="mt-4">
+            {/* 调整模式选择（B+C+D 方案） */}
+            <div className="mb-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-sm font-medium text-gray-700 flex items-center gap-1.5">
+                  <svg className="w-4 h-4 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
+                  </svg>
+                  调整模式
+                </label>
+                <div className="flex items-center gap-3">
+                  <label className="flex items-center gap-1 text-xs text-gray-500">
+                    <input
+                      type="checkbox"
+                      checked={enableWarnings}
+                      onChange={(e) => setEnableWarnings(e.target.checked)}
+                      className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                    />
+                    启用可行性提示
+                  </label>
+                  <label className="flex items-center gap-1 text-xs text-indigo-600 font-medium">
+                    <input
+                      type="checkbox"
+                      checked={enableAIFallback}
+                      onChange={(e) => setEnableAIFallback(e.target.checked)}
+                      className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                    />
+                    启用 AI 语义兜底
+                  </label>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <label className={`flex items-center gap-2 p-2 rounded-lg cursor-pointer transition-all ${
+                  adjustmentMode === 'auto' ? 'bg-indigo-100 border border-indigo-300' : 'bg-white border border-gray-200 hover:border-gray-300'
+                }`}>
+                  <input
+                    type="radio"
+                    name="adjustmentMode"
+                    checked={adjustmentMode === 'auto'}
+                    onChange={() => setAdjustmentMode('auto')}
+                    className="text-indigo-600 focus:ring-indigo-500"
+                  />
+                  <div>
+                    <div className="text-sm font-medium text-gray-700">🤖 自动模式</div>
+                    <div className="text-xs text-gray-500">根据目标差距动态调整</div>
+                  </div>
+                </label>
+
+                <label className={`flex items-center gap-2 p-2 rounded-lg cursor-pointer transition-all ${
+                  adjustmentMode === 'conservative' ? 'bg-green-100 border border-green-300' : 'bg-white border border-gray-200 hover:border-gray-300'
+                }`}>
+                  <input
+                    type="radio"
+                    name="adjustmentMode"
+                    checked={adjustmentMode === 'conservative'}
+                    onChange={() => setAdjustmentMode('conservative')}
+                    className="text-indigo-600 focus:ring-indigo-500"
+                  />
+                  <div>
+                    <div className="text-sm font-medium text-gray-700">🛡️ 保守型（±10%）</div>
+                    <div className="text-xs text-gray-500">调整幅度小，可行性高</div>
+                  </div>
+                </label>
+
+                <label className={`flex items-center gap-2 p-2 rounded-lg cursor-pointer transition-all ${
+                  adjustmentMode === 'moderate' ? 'bg-blue-100 border border-blue-300' : 'bg-white border border-gray-200 hover:border-gray-300'
+                }`}>
+                  <input
+                    type="radio"
+                    name="adjustmentMode"
+                    checked={adjustmentMode === 'moderate'}
+                    onChange={() => setAdjustmentMode('moderate')}
+                    className="text-indigo-600 focus:ring-indigo-500"
+                  />
+                  <div>
+                    <div className="text-sm font-medium text-gray-700">⚖️ 稳健型（±30%）</div>
+                    <div className="text-xs text-gray-500">平衡调整与可行性</div>
+                  </div>
+                </label>
+
+                <label className={`flex items-center gap-2 p-2 rounded-lg cursor-pointer transition-all ${
+                  adjustmentMode === 'aggressive' ? 'bg-orange-100 border border-orange-300' : 'bg-white border border-gray-200 hover:border-gray-300'
+                }`}>
+                  <input
+                    type="radio"
+                    name="adjustmentMode"
+                    checked={adjustmentMode === 'aggressive'}
+                    onChange={() => setAdjustmentMode('aggressive')}
+                    className="text-indigo-600 focus:ring-indigo-500"
+                  />
+                  <div>
+                    <div className="text-sm font-medium text-gray-700">🚀 进取型（±50%）</div>
+                    <div className="text-xs text-gray-500">允许突破性调整</div>
+                  </div>
+                </label>
+              </div>
+
+              {/* 自定义范围 */}
+              <label className={`flex items-center gap-3 p-2 mt-2 rounded-lg cursor-pointer transition-all ${
+                adjustmentMode === 'custom' ? 'bg-purple-100 border border-purple-300' : 'bg-white border border-gray-200 hover:border-gray-300'
+              }`}>
+                <input
+                  type="radio"
+                  name="adjustmentMode"
+                  checked={adjustmentMode === 'custom'}
+                  onChange={() => setAdjustmentMode('custom')}
+                  className="text-indigo-600 focus:ring-indigo-500"
+                />
+                <div className="text-sm font-medium text-gray-700">📏 自定义范围</div>
+                <div className="flex items-center gap-2 ml-auto">
+                  <input
+                    type="number"
+                    value={customRange.min}
+                    onChange={(e) => setCustomRange({ ...customRange, min: -Math.abs(Number(e.target.value)) })}
+                    className="w-20 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-indigo-500"
+                    placeholder="-50"
+                  />
+                  <span className="text-gray-400">~</span>
+                  <input
+                    type="number"
+                    value={customRange.max}
+                    onChange={(e) => setCustomRange({ ...customRange, max: Math.abs(Number(e.target.value)) })}
+                    className="w-20 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-indigo-500"
+                    placeholder="50"
+                  />
+                  <span className="text-gray-400">%</span>
+                </div>
+              </label>
+
+              {/* 特殊约束解析状态显示 */}
+              {specialConstraints && specialConstraints.length > 0 && (
+                <div className="mt-3 p-3 bg-green-50 border border-green-200 rounded-lg">
+                  <div className="flex items-start gap-2">
+                    <svg className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <div className="flex-1">
+                      <div className="font-medium text-green-800 text-sm mb-1">
+                        ✅ 已识别特殊约束（{constraintParseSource === 'rule' ? '规则引擎' : constraintParseSource === 'ai' ? 'AI 语义解析' : '未知来源'}）
+                      </div>
+                      <div className="text-xs text-green-700 space-y-1">
+                        {specialConstraints.map((c, i) => (
+                          <div key={i}>
+                            {c.factorName}: {c.description}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* AI 语义兜底加载状态 */}
+              {isAIFallbackLoading && (
+                <div className="mt-3 p-3 bg-indigo-50 border border-indigo-200 rounded-lg">
+                  <div className="flex items-center gap-2">
+                    <svg className="animate-spin h-4 w-4 text-indigo-600" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <span className="text-xs text-indigo-700">AI 语义解析中...</span>
+                  </div>
+                </div>
+              )}
+
+              {/* 预期与约束冲突提示 */}
+              {expectationConflict && enableWarnings && (
+                <div className="mt-3 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                  <div className="flex items-start gap-2">
+                    <svg className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                    </svg>
+                    <div className="flex-1">
+                      <div className="font-medium text-amber-800 text-sm mb-1">⚠️ 预期与约束可能存在冲突</div>
+                      <div className="text-xs text-amber-700 space-y-1">
+                        <div>当前预期：净利润 {expectationConflict.expectation}万（需要{expectationConflict.requiredGap > 0 ? '+' : ''}{expectationConflict.requiredGap}%）</div>
+                        <div>约束允许：{Math.round(Math.max(Math.abs(expectationConflict.allowedRange.min), expectationConflict.allowedRange.max) * 100)}%</div>
+                        <div>可行预期范围：{expectationConflict.feasibleRange.min}万 ~ {expectationConflict.feasibleRange.max}万</div>
+                      </div>
+                      <div className="flex gap-2 mt-2">
+                        <button
+                          onClick={() => setAdjustmentMode('aggressive')}
+                          className="px-3 py-1.5 text-xs bg-amber-100 hover:bg-amber-200 text-amber-800 rounded transition-colors"
+                        >
+                          🔄 切换到进取型
+                        </button>
+                        <button
+                          onClick={() => {
+                            const newExpected = expectationConflict.feasibleRange.max;
+                            setBusinessContext(businessContext.replace(
+                              /目标净利润\s*\d+(?:\.\d+)?\s*万/,
+                              `目标净利润${newExpected}万`
+                            ));
+                          }}
+                          className="px-3 py-1.5 text-xs bg-amber-100 hover:bg-amber-200 text-amber-800 rounded transition-colors"
+                        >
+                          ✏️ 调整预期
+                        </button>
+                        <button
+                          onClick={() => setExpectationConflict(null)}
+                          className="px-3 py-1.5 text-xs text-amber-600 hover:text-amber-800 transition-colors"
+                        >
+                          ✔️ 忽略警告
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* 特殊约束提示 */}
+              {specialConstraints.length > 0 && (
+                <div className="mt-3 p-3 bg-green-50 border border-green-200 rounded-lg">
+                  <div className="flex items-start gap-2">
+                    <svg className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <div className="flex-1">
+                      <div className="font-medium text-green-800 text-sm mb-1">✅ 已识别特殊约束</div>
+                      <div className="text-xs text-green-700 space-y-1">
+                        {specialConstraints.map((c, i) => (
+                          <div key={i}>• {c.description}</div>
+                        ))}
+                      </div>
+                      <div className="text-xs text-green-600 mt-2">
+                        💡 AI 分析时将自动应用这些约束
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* 节点选择器 */}
+          <div className="mt-4">
             <NodeSelector
               nodes={nodes}
               selectedMetrics={selectedMetrics}
@@ -2352,9 +2986,6 @@ ${businessContext}
                 setSelectedMetrics(selection.metrics);
                 setSelectedDrivers(selection.drivers);
                 setNodeSelectorMode(selection.mode);
-                if (selection.enableAIFallback !== undefined) {
-                  setEnableAIFallback(selection.enableAIFallback);
-                }
               }}
             />
           </div>
@@ -2423,13 +3054,6 @@ ${businessContext}
 
         {/* ===== 已选场景和知识库 ===== */}
         <div className="px-4 pb-3 bg-gradient-to-r from-indigo-50 to-purple-50 border-b">
-          {/* 规则管理面板 - 展开/收起 */}
-          {showRulePanel && (
-            <div className="mb-3 mx-2">
-              <ConstraintRulePanel onClose={() => setShowRulePanel(false)} />
-            </div>
-          )}
-
           <div className="flex items-center gap-4">
             {/* 已选场景 */}
             <div className="flex-1">
@@ -2503,12 +3127,6 @@ ${businessContext}
                 className="px-3 py-1.5 text-xs bg-green-600 text-white rounded hover:bg-green-700 transition-colors"
               >
                 选择知识库
-              </button>
-              <button
-                onClick={() => setShowRulePanel(!showRulePanel)}
-                className="px-3 py-1.5 text-xs bg-gray-500 text-white rounded hover:bg-gray-600 transition-colors"
-              >
-                规则管理
               </button>
             </div>
           </div>
@@ -2601,16 +3219,6 @@ ${businessContext}
                           <div className="space-y-1">
                             {aiResult.understanding.constraints.map((c, i) => (
                               <div key={i} className="text-sm text-orange-700">• {c}</div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                      {aiResult.ruleConstraints?.length > 0 && (
-                        <div>
-                          <div className="text-xs text-gray-500 mb-1">用户指定约束（规则引擎解析）</div>
-                          <div className="space-y-1">
-                            {aiResult.ruleConstraints.map((c, i) => (
-                              <div key={i} className="text-sm text-green-700">• {c.description}</div>
                             ))}
                           </div>
                         </div>
@@ -2715,30 +3323,27 @@ ${businessContext}
                     {/* 关键指标 */}
                     {aiResult.expectedImpact.keyMetrics?.length > 0 && (
                       <div className="grid grid-cols-1 gap-3">
-                        {aiResult.expectedImpact.keyMetrics.map((metric, i) => {
-                          // 动态计算百分比变化
-                          const changePercent = metric.before && metric.after
-                            ? ((metric.after - metric.before) / Math.abs(metric.before)) * 100
-                            : 0;
-                          const changeText = changePercent >= 0 ? `+${changePercent.toFixed(1)}%` : `${changePercent.toFixed(1)}%`;
-
+                        {aiResult.expectedImpact.keyMetrics?.map((metric, i) => {
+                          const actualNode = Object.values(nodes).find(n => n.name === metric.name || n.name?.includes(metric.name));
+                          const nodeFormat = actualNode?.format || '';
+                          const nodeUnit = actualNode?.unit || '';
                           return (
-                          <div key={i} className="p-3 bg-gradient-to-r from-green-50 to-emerald-50 rounded-lg border border-green-200">
-                            <div className="flex items-center justify-between">
-                              <span className="text-sm font-medium text-green-800">{metric.name}</span>
-                              {metric.probability && (
-                                <span className="text-xs text-green-600">概率: {metric.probability}</span>
-                              )}
+                            <div key={i} className="p-3 bg-gradient-to-r from-green-50 to-emerald-50 rounded-lg border border-green-200">
+                              <div className="flex items-center justify-between">
+                                <span className="text-sm font-medium text-green-800">{metric.name}</span>
+                                {metric.probability && (
+                                  <span className="text-xs text-green-600">概率：{metric.probability}</span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-3 mt-2">
+                                <span className="text-gray-500">{formatValue(metric.before, nodeFormat, nodeUnit)}</span>
+                                <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 8l4 4m0 0l-4 4m4-4H3" />
+                                </svg>
+                                <span className="text-xl font-bold text-green-700">{formatValue(metric.after, nodeFormat, nodeUnit)}</span>
+                                <span className="text-sm text-green-600">{metric.change}</span>
+                              </div>
                             </div>
-                            <div className="flex items-center gap-3 mt-2">
-                              <span className="text-gray-500">{metric.before?.toLocaleString()}</span>
-                              <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 8l4 4m0 0l-4 4m4-4H3" />
-                              </svg>
-                              <span className="text-xl font-bold text-green-700">{metric.after?.toLocaleString()}</span>
-                              <span className={`text-sm ${changePercent >= 0 ? 'text-green-600' : 'text-red-600'}`}>{changeText}</span>
-                            </div>
-                          </div>
                           );
                         })}
                       </div>
@@ -2801,21 +3406,8 @@ ${businessContext}
                       </div>
                       <div className="text-right">
                         <div className="text-sm text-gray-600">差距</div>
-                        <div className={`text-xl font-bold ${
-                          validationResult.gap >= 0 ? 'text-green-600' : 'text-red-600'
-                        }`}>
-                          {validationResult.gap >= 0 ? '超出' : '差距'}
-                          {validationResult.formattedGap || Math.round(Math.abs(validationResult.currentValue - validationResult.recommendedValue))}
-                          {validationResult.formattedChangePercent && (
-                            <span className={`text-sm ml-1 ${
-                              validationResult.gap >= 0 ? 'text-green-600' : 'text-red-600'
-                            }`}>
-                              ({validationResult.gap >= 0 ? '+' : '-'}{validationResult.formattedChangePercent})
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-xs text-gray-500 mt-0.5">
-                          变化额：{validationResult.gap >= 0 ? '+' : ''}{Math.round(validationResult.gap)}{validationResult.unit || '万'}
+                        <div className={`text-xl font-bold ${validationResult.gap >= 0 ? 'text-green-600' : 'text-orange-600'}`}>
+                          {validationResult.gap >= 0 ? '超出' : '差距'}{validationResult.formattedGap || Math.round(Math.abs(validationResult.currentValue - validationResult.recommendedValue))}
                         </div>
                       </div>
                     </div>

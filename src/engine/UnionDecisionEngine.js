@@ -1,28 +1,31 @@
 /**
  * 并集决策引擎
- * 整合知识库命中结果和兜底策略候选，生成最终调参方案
+ * 整合 AI 建议、知识库命中结果和兜底策略候选，生成最终调参方案
  */
 
 /**
  * 并集决策配置
  */
 const DEFAULT_CONFIG = {
-  maxFactors: 3,           // 最多同时调整的因子数
-  knowledgeBaseWeight: 0.7, // 知识库权重
-  fallbackWeight: 0.3,      // 兜底策略权重
-  crossBoost: 1.1,          // 同时出现的因子加成系数
-  minPriorityThreshold: 0.5, // 最低优先级阈值
-  maxSameSource: 2          // 同一来源最多选几个
+  maxFactors: 5,           // 最多同时调整的因子数（增加到 5 个）
+  aiWeight: 0.5,           // AI 建议权重（最高，避免被覆盖）
+  knowledgeBaseWeight: 0.35, // 知识库权重
+  fallbackWeight: 0.15,      // 兜底策略权重
+  crossBoost: 1.15,          // 同时出现的因子加成系数
+  minPriorityThreshold: 0.3, // 最低优先级阈值（降低，保留更多候选）
+  maxSameSource: 3           // 同一来源最多选几个
 };
 
 /**
  * 执行并集决策
+ * @param {Array} aiAdjustments - AI 返回的调整建议
  * @param {Array} knowledgeResults - 知识库命中结果
  * @param {Array} fallbackResults - 兜底策略候选结果
  * @param {Object} config - 配置选项
  * @returns {Object} 并集决策结果
  */
 export const executeUnionDecision = (
+  aiAdjustments = [],
   knowledgeResults = [],
   fallbackResults = [],
   config = DEFAULT_CONFIG
@@ -32,32 +35,59 @@ export const executeUnionDecision = (
   // 步骤 1：合并去重
   const candidateMap = new Map();
 
-  // 添加知识库结果
-  knowledgeResults.forEach(item => {
+  // 添加 AI 建议（最高优先级）
+  aiAdjustments.forEach(item => {
     candidateMap.set(item.nodeId, {
       ...item,
-      source: 'knowledge',
-      sources: ['knowledge'],
-      knowledgeData: item,
+      source: 'ai',
+      sources: ['ai'],
+      aiData: item,
+      knowledgeData: null,
       fallbackData: null
     });
+  });
+
+  // 添加知识库结果
+  knowledgeResults.forEach(item => {
+    const existing = candidateMap.get(item.nodeId);
+    if (existing) {
+      // 冲突：AI 和知识库都建议
+      existing.source = 'ai+knowledge';
+      existing.sources = ['ai', 'knowledge'];
+      existing.knowledgeData = item;
+      // 融合调整值
+      fuseAdjustment(existing, item, effectiveConfig, 'knowledge');
+    } else {
+      candidateMap.set(item.nodeId, {
+        ...item,
+        source: 'knowledge',
+        sources: ['knowledge'],
+        aiData: null,
+        knowledgeData: item,
+        fallbackData: null
+      });
+    }
   });
 
   // 添加兜底策略结果
   fallbackResults.forEach(item => {
     const existing = candidateMap.get(item.nodeId);
     if (existing) {
-      // 冲突：同时存在于知识库和兜底
-      existing.source = 'both';
-      existing.sources = ['knowledge', 'fallback'];
+      // 冲突：已存在，融合
+      const prevSource = existing.source;
+      existing.source = prevSource === 'ai' ? 'ai+fallback' :
+                        prevSource === 'knowledge' ? 'knowledge+fallback' :
+                        prevSource === 'ai+knowledge' ? 'all' : 'fallback';
+      existing.sources = [...new Set([...existing.sources, 'fallback'])];
       existing.fallbackData = item;
       // 融合调整值
-      existing = fuseAdjustment(existing, item, effectiveConfig);
+      fuseAdjustment(existing, item, effectiveConfig, 'fallback');
     } else {
       candidateMap.set(item.nodeId, {
         ...item,
         source: 'fallback',
         sources: ['fallback'],
+        aiData: null,
         knowledgeData: null,
         fallbackData: item
       });
@@ -92,67 +122,144 @@ export const executeUnionDecision = (
     totalCandidates: candidates.length,
     selectedCount: selectedCandidates.length,
     selectedCandidates,
-    knowledgeOnly: knowledgeResults.length,
-    fallbackOnly: fallbackResults.length,
-    bothCount: candidates.filter(c => c.source === 'both').length,
+    aiOnly: candidates.filter(c => c.source === 'ai').length,
+    knowledgeOnly: candidates.filter(c => c.source === 'knowledge').length,
+    fallbackOnly: candidates.filter(c => c.source === 'fallback').length,
+    aiKnowledge: candidates.filter(c => c.source === 'ai+knowledge').length,
+    aiFallback: candidates.filter(c => c.source === 'ai+fallback').length,
+    all: candidates.filter(c => c.source === 'all').length,
     summary: generateUnionSummary(selectedCandidates),
     config: effectiveConfig
   };
 };
 
 /**
- * 融合知识库和兜底策略的调整值
+ * 融合调整值（支持 AI、知识库、兜底策略三方融合）
+ * @param {Object} existingItem - 已存在的候选项
+ * @param {Object} newItem - 新的候选项
+ * @param {Object} config - 配置
+ * @param {string} sourceType - 新增的来源类型 ('knowledge' 或 'fallback')
  */
-const fuseAdjustment = (knowledgeItem, fallbackItem, config) => {
-  const { recommendedValue: kbValue, currentValue } = knowledgeItem;
-  const { recommendedValue: fbValue } = fallbackItem;
+const fuseAdjustment = (existingItem, newItem, config, sourceType) => {
+  const { recommendedValue: currentValue } = existingItem;
+  let totalWeight = 0;
+  let weightedDelta = 0;
 
-  // 计算调整幅度
-  const kbDelta = kbValue - currentValue;
-  const fbDelta = fbValue - currentValue;
+  // 如果已有 AI 数据，加入 AI 权重
+  if (existingItem.aiData && sourceType !== 'ai') {
+    const aiDelta = (existingItem.aiData.recommendedValue || 0) - (existingItem.aiData.currentValue || 0);
+    weightedDelta += aiDelta * config.aiWeight;
+    totalWeight += config.aiWeight;
+  }
 
-  // 加权融合
-  const fusedDelta = kbDelta * config.knowledgeBaseWeight + fbDelta * config.fallbackWeight;
-  const fusedValue = currentValue + fusedDelta;
+  // 如果已有知识库数据，加入知识库权重
+  if (existingItem.knowledgeData && sourceType !== 'knowledge') {
+    const kbDelta = (existingItem.knowledgeData.recommendedValue || 0) - (existingItem.knowledgeData.currentValue || 0);
+    weightedDelta += kbDelta * config.knowledgeBaseWeight;
+    totalWeight += config.knowledgeBaseWeight;
+  }
+
+  // 如果已有兜底数据，加入兜底权重
+  if (existingItem.fallbackData && sourceType !== 'fallback') {
+    const fbDelta = (existingItem.fallbackData.recommendedValue || 0) - (existingItem.fallbackData.currentValue || 0);
+    weightedDelta += fbDelta * config.fallbackWeight;
+    totalWeight += config.fallbackWeight;
+  }
+
+  // 添加新项目的贡献
+  const newDelta = (newItem.recommendedValue || 0) - (newItem.currentValue || 0);
+  if (sourceType === 'knowledge') {
+    weightedDelta += newDelta * config.knowledgeBaseWeight;
+    totalWeight += config.knowledgeBaseWeight;
+  } else if (sourceType === 'fallback') {
+    weightedDelta += newDelta * config.fallbackWeight;
+    totalWeight += config.fallbackWeight;
+  }
+
+  // 计算融合值
+  const fusedDelta = totalWeight > 0 ? weightedDelta / totalWeight : newDelta;
+  const fusedValue = (existingItem.currentValue || 0) + fusedDelta;
 
   // 融合置信度（取较高值）
   const fusedConfidence = Math.max(
-    knowledgeItem.confidence || 0.7,
-    fallbackItem.confidence || 0.5
+    existingItem.confidence || 0.7,
+    newItem.confidence || 0.5
   );
 
-  return {
-    ...knowledgeItem,
-    recommendedValue: Math.round(fusedValue * 100) / 100,
-    changePercent: Math.round((fusedDelta / currentValue) * 100 * 100) / 100,
-    confidence: fusedConfidence,
-    fusedFrom: {
-      knowledge: { value: kbValue, delta: kbDelta },
-      fallback: { value: fbValue, delta: fbDelta }
-    },
-    fusionReason: `结合历史经验（${formatValue(kbValue)}）和当前分析（${formatValue(fbValue)}）`
-  };
+  // 更新现有对象（不返回新对象，因为 existingItem 是引用）
+  existingItem.recommendedValue = Math.round(fusedValue * 100) / 100;
+  existingItem.changePercent = Math.round((fusedDelta / (existingItem.currentValue || 1)) * 100 * 100) / 100;
+  existingItem.confidence = fusedConfidence;
+  existingItem.fusionReason = generateFusionReason(existingItem, sourceType);
+
+  return existingItem;
 };
 
 /**
- * 计算综合优先级
+ * 生成融合原因说明
+ */
+const generateFusionReason = (item, sourceType) => {
+  const parts = [];
+
+  if (item.aiData) {
+    parts.push(`AI 分析 (${formatValue(item.aiData.recommendedValue)})`);
+  }
+  if (item.knowledgeData) {
+    parts.push(`历史经验 (${formatValue(item.knowledgeData.recommendedValue)})`);
+  }
+  if (item.fallbackData) {
+    parts.push(`数据分析 (${formatValue(item.fallbackData.recommendedValue)})`);
+  }
+
+  return parts.length > 1 ? `融合：${parts.join(' + ')}` : (item.changeReason || '基于数据分析');
+};
+
+/**
+ * 计算综合优先级（AI 优先）
  */
 const calculateCombinedPriority = (candidate, config) => {
   let priority = 0;
 
-  if (candidate.source === 'knowledge') {
-    // 仅知识库：P = 0.8 + (相似度 × 0.2)
+  // AI 独家的优先级最高
+  if (candidate.source === 'ai') {
+    priority = 0.9 + (candidate.confidence || 0.7) * 0.1;
+  }
+  // AI + 知识库融合：次高
+  else if (candidate.source === 'ai+knowledge') {
     const similarity = candidate.similarity || 0.6;
-    priority = 0.8 + similarity * 0.2;
-  } else if (candidate.source === 'fallback') {
-    // 仅兜底：使用原有的 priorityScore
+    priority = (0.85 + similarity * 0.15) * config.crossBoost;
+  }
+  // AI + 兜底融合：次高
+  else if (candidate.source === 'ai+fallback') {
+    const fbPriority = candidate.confidence || candidate.priorityScore || 0.5;
+    priority = Math.max(0.85, fbPriority) * config.crossBoost;
+  }
+  // AI + 知识库 + 兜底三方融合：最高
+  else if (candidate.source === 'all') {
+    const similarity = candidate.similarity || 0.6;
+    const kbPart = 0.85 + similarity * 0.15;
+    const fbPart = candidate.confidence || candidate.priorityScore || 0.5;
+    priority = Math.max(kbPart, fbPart) * config.crossBoost * 1.05;
+  }
+  // 仅知识库
+  else if (candidate.source === 'knowledge') {
+    const similarity = candidate.similarity || 0.6;
+    priority = 0.7 + similarity * 0.25;
+  }
+  // 仅兜底
+  else if (candidate.source === 'fallback') {
     priority = candidate.confidence || candidate.priorityScore || 0.5;
-  } else {
-    // 同时出现：max(知识库分，兜底分) × 1.1
+  }
+  // 知识库 + 兜底融合
+  else if (candidate.source === 'knowledge+fallback' || candidate.source === 'both') {
     const similarity = candidate.similarity || 0.6;
-    const kbPriority = 0.8 + similarity * 0.2;
+    const kbPriority = 0.7 + similarity * 0.25;
     const fbPriority = candidate.confidence || candidate.priorityScore || 0.5;
     priority = Math.max(kbPriority, fbPriority) * config.crossBoost;
+  }
+  // 默认
+  else {
+    priority = candidate.confidence || 0.5;
   }
 
   return Math.round(priority * 100) / 100;
@@ -191,14 +298,20 @@ const generateUnionSummary = (candidates) => {
     return '无符合条件的候选因子';
   }
 
+  const aiCount = candidates.filter(c => c.source === 'ai').length;
   const knowledgeCount = candidates.filter(c => c.source === 'knowledge').length;
   const fallbackCount = candidates.filter(c => c.source === 'fallback').length;
-  const bothCount = candidates.filter(c => c.source === 'both').length;
+  const aiKnowledgeCount = candidates.filter(c => c.source === 'ai+knowledge').length;
+  const aiFallbackCount = candidates.filter(c => c.source === 'ai+fallback').length;
+  const allCount = candidates.filter(c => c.source === 'all').length;
 
   const parts = [];
+  if (aiCount > 0) parts.push(`AI 推荐 ${aiCount}个`);
   if (knowledgeCount > 0) parts.push(`知识库 ${knowledgeCount}个`);
   if (fallbackCount > 0) parts.push(`兜底策略 ${fallbackCount}个`);
-  if (bothCount > 0) parts.push(`融合 ${bothCount}个`);
+  if (aiKnowledgeCount > 0) parts.push(`AI+ 知识库 ${aiKnowledgeCount}个`);
+  if (aiFallbackCount > 0) parts.push(`AI+ 兜底 ${aiFallbackCount}个`);
+  if (allCount > 0) parts.push(`三方融合 ${allCount}个`);
 
   return `最终方案：${parts.join('，')}，共 ${candidates.length}个因子`;
 };
@@ -217,16 +330,37 @@ const formatValue = (value) => {
  */
 export const convertToAIFORMat = (unionResult) => {
   return unionResult.selectedCandidates.map(candidate => {
-    const sourceLabel = candidate.source === 'knowledge' ? '知识库' :
-                        candidate.source === 'fallback' ? '兜底策略' : '融合';
+    const sourceLabel = candidate.source === 'ai' ? 'AI 推荐' :
+                        candidate.source === 'knowledge' ? '知识库' :
+                        candidate.source === 'fallback' ? '兜底策略' :
+                        candidate.source === 'ai+knowledge' ? 'AI+ 知识库' :
+                        candidate.source === 'ai+fallback' ? 'AI+ 兜底' :
+                        candidate.source === 'all' ? '三方融合' : '融合';
+
+    // 【业务合理性检查】确保建议值在目标值的±5% 范围内
+    const targetValue = candidate.targetValue || candidate.currentValue;
+    const minAllowed = targetValue * 0.95;
+    const maxAllowed = targetValue * 1.05;
+    let finalRecommendedValue = candidate.recommendedValue;
+    let adjustedReason = candidate.fusionReason || candidate.changeReason || candidate.recommendation;
+
+    if (finalRecommendedValue < minAllowed) {
+      console.log(`[并集决策 - 业务合理性] ${candidate.nodeName} 建议值 ${finalRecommendedValue} 低于目标值 95% (${minAllowed})，调整为最低允许值`);
+      finalRecommendedValue = Math.round(minAllowed * 100) / 100;
+      adjustedReason = `基于业务目标，该${candidate.nodeName}需达到目标范围（目标值±5%），建议调整至${finalRecommendedValue}`;
+    } else if (finalRecommendedValue > maxAllowed) {
+      console.log(`[并集决策 - 业务合理性] ${candidate.nodeName} 建议值 ${finalRecommendedValue} 高于目标值 105% (${maxAllowed})，调整为最高允许值`);
+      finalRecommendedValue = Math.round(maxAllowed * 100) / 100;
+      adjustedReason = `基于业务目标，该${candidate.nodeName}需控制在目标范围（目标值±5%），建议调整至${finalRecommendedValue}`;
+    }
 
     return {
       nodeId: candidate.nodeId,
       nodeName: candidate.nodeName,
       currentValue: candidate.currentValue,
-      recommendedValue: candidate.recommendedValue,
+      recommendedValue: finalRecommendedValue,
       changePercent: candidate.changePercent,
-      changeReason: candidate.fusionReason || candidate.changeReason || candidate.recommendation,
+      changeReason: adjustedReason,
       dataBasis: candidate.dataBasis || '基于数据分析',
       businessReason: candidate.businessReason || '支持业务目标达成',
       riskWarning: candidate.riskWarning || '风险可控',

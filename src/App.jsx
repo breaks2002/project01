@@ -17,6 +17,7 @@ import WaterfallChart from './components/Canvas/WaterfallChart';
 import NodeTreeList from './components/NodeTreeList/NodeTreeList';
 import KnowledgeBasePanel from './components/KnowledgeBase/KnowledgeBasePanel';
 import ScenarioSelector from './components/KnowledgeBase/ScenarioSelector';
+import ConstraintRulePanel from './components/DataPanel/ConstraintRulePanel';
 import { sampleSalesModel, sampleProfitModel } from './examples/sampleModel';
 import html2canvas from 'html2canvas';
 
@@ -81,6 +82,8 @@ function App() {
   const [showAITuning, setShowAITuning] = useState(false);
   const [showKnowledgeBase, setShowKnowledgeBase] = useState(false);
   const [showScenarioSelector, setShowScenarioSelector] = useState(false);
+  const [showRulePanel, setShowRulePanel] = useState(false);
+  const [rulePanelZIndex, setRulePanelZIndex] = useState(59);
   const [knowledgeBaseZIndex, setKnowledgeBaseZIndex] = useState(57);
   const [scenarioSelectorZIndex, setScenarioSelectorZIndex] = useState(58);
   const [selectedScenarios, setSelectedScenarios] = useState([]); // 选中的场景
@@ -205,6 +208,11 @@ function App() {
   const bringScenarioSelectorToFront = useCallback(() => {
     const maxZ = Math.max(...getAllZIndexes()) + 1;
     setScenarioSelectorZIndex(maxZ);
+  }, [getAllZIndexes]);
+
+  const bringRulePanelToFront = useCallback(() => {
+    const maxZ = Math.max(...getAllZIndexes()) + 1;
+    setRulePanelZIndex(maxZ);
   }, [getAllZIndexes]);
 
   const handleSelectScenarios = useCallback((scenarios) => {
@@ -910,6 +918,10 @@ function App() {
         onOpenScenarioSelector={() => {
           setShowScenarioSelector(true);
         }}
+        onOpenRulePanel={() => {
+          setShowRulePanel(true);
+        }}
+        showRulePanel={showRulePanel}
       />
 
       {/* 缩放控制栏 */}
@@ -1225,6 +1237,20 @@ function App() {
           <ScenarioSelector
             onClose={() => setShowScenarioSelector(false)}
             onSelectScenarios={handleSelectScenarios}
+          />
+        </div>
+      )}
+
+      {/* 规则管理面板 - 可拖动窗口 */}
+      {showRulePanel && (
+        <div
+          style={{ zIndex: rulePanelZIndex }}
+          className="fixed"
+          onClick={bringRulePanelToFront}
+        >
+          <ConstraintRulePanel
+            onClose={() => setShowRulePanel(false)}
+            position={{ x: 200, y: 150 }}
           />
         </div>
       )}

@@ -23,7 +23,13 @@
       "Bash(sed -i 's/3. \\\\*\\\\*差距分析\\\\*\\\\*/4. **差距分析**/g; s/4. \\\\*\\\\*不达标处理\\\\*\\\\*/5. **不达标处理**/g' src/utils/aiPromptBuilder.js)",
       "Bash(sed -i 's/2. \\\\*\\\\*计算验证\\\\*\\\\*/3. **计算验证**/g' src/utils/aiPromptBuilder.js)",
       "Read(//tmp/**)",
-      "Bash(src/utils/aiPromptBuilder.js:*)"
+      "Bash(src/utils/aiPromptBuilder.js:*)",
+      "Bash(node -e \"require\\(''./src/utils/constraintPatterns.js''\\)\")",
+      "Bash(rm -rf node_modules/.vite dist/.vite)",
+      "Bash(rm src/components/DataPanel/AITuningPanel.jsx.tmp)",
+      "Bash(netstat -ano)",
+      "Bash(findstr :5173)",
+      "Bash(node -e \"console.log\\(''请用户在浏览器控制台执行：console.log\\(JSON.parse\\(localStorage.getItem\\(\"\"vdt_constraint_rules\"\"\\)\\)\\)''\\)\")"
     ]
   }
 }

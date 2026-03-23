@@ -1,6 +1,7 @@
 import React from 'react';
 import ScenarioManager from './ScenarioManager';
 import useVDTStore from '../../store/useVDTStore';
+import ConstraintRulePanel from '../DataPanel/ConstraintRulePanel';
 
 const Toolbar = ({
   onOpenEditor,
@@ -39,7 +40,9 @@ const Toolbar = ({
   showAITuning,
   onOpenKnowledgeBase,
   showKnowledgeBase,
-  onOpenScenarioSelector
+  onOpenScenarioSelector,
+  onOpenRulePanel,
+  showRulePanel
 }) => {
   // 获取模型数据检查是否已加载
   const nodes = useVDTStore((s) => s.nodes);
@@ -170,6 +173,16 @@ const Toolbar = ({
               <span>
                 <div className="font-medium">知识库</div>
                 <div className="text-xs text-gray-500">管理历史案例</div>
+              </span>
+            </button>
+            <button
+              onClick={onOpenRulePanel}
+              className="w-full px-4 py-2 text-left hover:bg-gray-50 text-sm flex items-center gap-2"
+            >
+              <span>📋</span>
+              <span>
+                <div className="font-medium">规则管理</div>
+                <div className="text-xs text-gray-500">配置约束映射规则</div>
               </span>
             </button>
             <div className="border-t my-1" />

@@ -474,10 +474,27 @@ const calculatePriorityScore = (data) => {
 
 /**
  * 创建调整方案（完全动态，不硬编码任何字段）
+ * @param {Object} driver - 驱动因子
+ * @param {string} direction - 调整方向
+ * @param {number} priorityScore - 优先级分数
+ * @param {Object} targetMetric - 目标指标
+ * @param {Array} computedMetrics - 计算指标列表（用于因子联动分析）
  */
-const createAdjustment = (driver, direction, priorityScore, targetMetric = null) => {
+const createAdjustment = (driver, direction, priorityScore, targetMetric = null, computedMetrics = []) => {
   const gapAnalysis = calculateGap(driver, targetMetric);
   const zoneAnalysis = analyzeZone(driver);
+
+  // 分析时间序列数据
+  const timeAnalysis = analyzeTimeData(driver);
+
+  // 计算目标值（优先使用节点的目标值，其次使用当前值）
+  const targetValue = driver.targetValue !== null && driver.targetValue !== undefined
+    ? driver.targetValue
+    : driver.currentValue;
+
+  // 业务合理性：允许的调整范围是目标值的±5%
+  const minAllowedValue = targetValue * 0.95;  // 最低允许值（目标值的 95%）
+  const maxAllowedValue = targetValue * 1.05;  // 最高允许值（目标值的 105%）
 
   // 根据优先级和差距计算建议值
   let changePercent, recommendedValue, changeReason;
@@ -487,13 +504,37 @@ const createAdjustment = (driver, direction, priorityScore, targetMetric = null)
     const baseIncrease = gapAnalysis.relativeGap || (priorityScore * 0.2);
     changePercent = Math.round(Math.min(baseIncrease * 100, 50) * 100) / 100; // 最多提升 50%
     recommendedValue = Math.round(driver.currentValue * (1 + changePercent / 100) * 100) / 100;
-    changeReason = `基于数据分析，该${driver.name}优先级分数${(priorityScore * 100).toFixed(0)}%，建议提升${changePercent.toFixed(1)}%`;
+
+    // 【业务合理性检查】如果建议值低于目标值的 95%，说明提升不足
+    if (recommendedValue < minAllowedValue) {
+      console.log(`[业务合理性] ${driver.name} 建议值 ${recommendedValue} 低于目标值 95% (${minAllowedValue})，调整为最低允许值`);
+      recommendedValue = Math.round(minAllowedValue * 100) / 100;
+      changePercent = Math.round(((recommendedValue - driver.currentValue) / driver.currentValue) * 100 * 100) / 100;
+      changeReason = `基于业务目标，该${driver.name}需达到目标范围（目标值±5%），建议提升至${recommendedValue}`;
+    } else {
+      changeReason = `基于数据分析，该${driver.name}优先级分数${(priorityScore * 100).toFixed(0)}%，建议提升${changePercent.toFixed(1)}%`;
+    }
   } else if (direction === 'decrease') {
     // 降低幅度：基于优先级和差距
     const baseDecrease = gapAnalysis.relativeGap || (priorityScore * 0.15);
     changePercent = -Math.round(Math.min(baseDecrease * 100, 30) * 100) / 100; // 最多降低 30%
     recommendedValue = Math.round(driver.currentValue * (1 + changePercent / 100) * 100) / 100;
-    changeReason = `基于数据分析，该${driver.name}优先级分数${(priorityScore * 100).toFixed(0)}%，建议优化降低${Math.abs(changePercent).toFixed(1)}%`;
+
+    // 【业务合理性检查】如果建议值高于目标值的 105%，说明降低不足
+    if (recommendedValue > maxAllowedValue) {
+      console.log(`[业务合理性] ${driver.name} 建议值 ${recommendedValue} 高于目标值 105% (${maxAllowedValue})，调整为最高允许值`);
+      recommendedValue = Math.round(maxAllowedValue * 100) / 100;
+      changePercent = Math.round(((recommendedValue - driver.currentValue) / driver.currentValue) * 100 * 100) / 100;
+      changeReason = `基于业务目标，该${driver.name}需控制在目标范围（目标值±5%），建议优化至${recommendedValue}`;
+    } else if (recommendedValue < minAllowedValue) {
+      // 如果建议值低于目标值的 95%，说明降低过度
+      console.log(`[业务合理性] ${driver.name} 建议值 ${recommendedValue} 低于目标值 95% (${minAllowedValue})，调整为最低允许值`);
+      recommendedValue = Math.round(minAllowedValue * 100) / 100;
+      changePercent = Math.round(((recommendedValue - driver.currentValue) / driver.currentValue) * 100 * 100) / 100;
+      changeReason = `基于业务目标，该${driver.name}需控制在目标范围（目标值±5%），建议调整为${recommendedValue}`;
+    } else {
+      changeReason = `基于数据分析，该${driver.name}优先级分数${(priorityScore * 100).toFixed(0)}%，建议优化降低${Math.abs(changePercent).toFixed(1)}%`;
+    }
   } else {
     // 保持现状
     changePercent = 0;
@@ -502,7 +543,6 @@ const createAdjustment = (driver, direction, priorityScore, targetMetric = null)
   }
 
   // 生成月度策略（基于时间数据分析）
-  const timeAnalysis = analyzeTimeData(driver);
   const monthlyStrategy = generateMonthlyStrategy(driver, direction, timeAnalysis);
 
   return {
@@ -821,13 +861,13 @@ export const generateFallbackStrategy = ({
     .sort((a, b) => b.priorityScore - a.priorityScore)
     .slice(0, negativeTopN);
 
-  // 10. 创建调整方案
+  // 10. 创建调整方案（传入 computedMetrics）
   const positiveAdjustments = positiveDrivers.map(d =>
-    createAdjustment(d.driver, 'increase', d.priorityScore, targetMetric)
+    createAdjustment(d.driver, 'increase', d.priorityScore, targetMetric, computedMetrics)
   );
 
   const negativeAdjustments = negativeDrivers.map(d =>
-    createAdjustment(d.driver, 'decrease', d.priorityScore, targetMetric)
+    createAdjustment(d.driver, 'decrease', d.priorityScore, targetMetric, computedMetrics)
   );
 
   const allAdjustments = [...positiveAdjustments, ...negativeAdjustments];

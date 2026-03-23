@@ -15,8 +15,9 @@ const NodeSelector = ({
   const [searchDrivers, setSearchDrivers] = useState('');
   const [showMetricsModal, setShowMetricsModal] = useState(false);
   const [showDriversModal, setShowDriversModal] = useState(false);
-  const [showDependencyModal, setShowDependencyModal] = useState(false); // 计算链弹窗
-  const [nonModal, setNonModal] = useState(true); // 非模态模式
+  const [showDependencyModal, setShowDependencyModal] = useState(false);
+  const [nonModal, setNonModal] = useState(true);
+  const [enableAIFallback, setEnableAIFallback] = useState(true); // AI 语义兜底默认启用
 
   // 面板显示阈值
   const PANEL_THRESHOLD = 6; // 超过 6 个节点时，使用弹窗模式（约 2 行）
@@ -30,9 +31,9 @@ const NodeSelector = ({
     };
   }, [nodes]);
 
-  // 计算链分析
+  // 计算链分析（支持多指标）
   const dependencyChain = useMemo(() => {
-    if (!targetMetric) return [];
+    if (selectedMetrics.length === 0) return [];
     const chain = [];
     const visited = new Set();
 
@@ -43,7 +44,7 @@ const NodeSelector = ({
       const node = nodes[nodeId];
       if (!node) return;
 
-      if (depth > 0) {
+      if (depth > 0 && !chain.find(n => n.id === nodeId)) {
         chain.push({ ...node, depth });
       }
 
@@ -58,9 +59,16 @@ const NodeSelector = ({
       }
     };
 
-    findDependencies(targetMetric);
+    // 从所有选中的指标开始查找依赖
+    selectedMetrics.forEach(metricId => {
+      findDependencies(metricId, 0);
+    });
+
+    // 按深度排序，浅的在前
+    chain.sort((a, b) => a.depth - b.depth);
+
     return chain;
-  }, [nodes, targetMetric]);
+  }, [nodes, selectedMetrics]);
 
   // 搜索过滤
   const filteredComputedNodes = useMemo(() => {
@@ -143,11 +151,11 @@ const NodeSelector = ({
       {/* 模式选择 */}
       <div className="p-3 border-b border-gray-200">
         <div className="flex items-center gap-3">
-          <label className="flex items-center gap-2 cursor-pointer">
+          <label className="flex items-center gap-2 cursor-pointer" title="AI 自主选择模式下，AI 语义兜底默认启用">
             <input
               type="radio"
               checked={mode === 'auto'}
-              onChange={() => onChange?.({ metrics: selectedMetrics, drivers: selectedDrivers, mode: 'auto' })}
+              onChange={() => onChange?.({ metrics: selectedMetrics, drivers: selectedDrivers, mode: 'auto', enableAIFallback: true })}
               className="w-4 h-4 text-indigo-600"
             />
             <span className="text-sm font-medium text-gray-700">🤖 AI 自主选择（推荐）</span>
@@ -156,10 +164,23 @@ const NodeSelector = ({
             <input
               type="radio"
               checked={mode === 'manual'}
-              onChange={() => onChange?.({ metrics: selectedMetrics, drivers: selectedDrivers, mode: 'manual' })}
+              onChange={() => onChange?.({ metrics: selectedMetrics, drivers: selectedDrivers, mode: 'manual', enableAIFallback })}
               className="w-4 h-4 text-indigo-600"
             />
             <span className="text-sm font-medium text-gray-700">✋ 指定调整范围</span>
+          </label>
+          {/* AI 语义兜底开关 - 始终显示 */}
+          <label className="flex items-center gap-1.5 cursor-pointer text-xs text-indigo-600 bg-indigo-50 px-2 py-1 rounded border border-indigo-200">
+            <input
+              type="checkbox"
+              checked={enableAIFallback}
+              onChange={(e) => {
+                setEnableAIFallback(e.target.checked);
+                onChange?.({ metrics: selectedMetrics, drivers: selectedDrivers, mode: mode, enableAIFallback: e.target.checked });
+              }}
+              className="w-3.5 h-3.5 text-indigo-600 rounded"
+            />
+            <span>🧠 AI 语义兜底</span>
           </label>
         </div>
       </div>

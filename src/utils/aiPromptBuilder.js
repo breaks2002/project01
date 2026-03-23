@@ -6,6 +6,45 @@ import { generateFallbackStrategy } from '../engine/FallbackStrategyEngine.js';
  * 支持业务背景理解、数据洞察分析、智能建议生成
  */
 
+const formatConstraintDescription = (c) => {
+  if (!c) return '';
+
+  const { factorName, description, constraint, unitType, unit, value } = c;
+
+  // 使用 constraintType 来判断约束类型
+  const constraintType = constraint?.constraintType;
+
+  switch (constraintType) {
+    case 'max_absolute':
+      return `不超过 ${constraint.maxValue}${unit || ''}（最大值限制）`;
+
+    case 'max_relative':
+      return `不超过 ${Math.round(constraint.max * 100)}%（相对值上限）`;
+
+    case 'min_absolute':
+      return `不低于 ${constraint.minValue}${unit || ''}（最小值要求）`;
+
+    case 'min_relative':
+      return `不低于 ${Math.round(constraint.min * 100)}%（相对值下限）`;
+
+    case 'delta_point':
+      // 百分点：直接加减
+      const deltaPoint = constraint.delta * 100;
+      const direction = deltaPoint > 0 ? '增加' : '降低';
+      return `需要${direction}${Math.abs(deltaPoint)}个百分点（从当前值${deltaPoint > 0 ? '+' : ''}${deltaPoint}%）`;
+
+    case 'delta_percent':
+      // 百分比增幅：乘法
+      const deltaPercent = constraint.delta * 100;
+      const dir = deltaPercent > 0 ? '增加' : '降低';
+      return `需要${dir}${Math.abs(deltaPercent)}%（相对增幅，原值×(1+${deltaPercent}%)）`;
+
+    default:
+      // 兜底：使用原有 description
+      return description || `调整${value}${unit || ''}`;
+  }
+};
+
 // ==================== 数据计算工具函数 ====================
 
 /**
@@ -566,9 +605,17 @@ export const buildSmartTuningPrompt = ({
   // 节点选择（新增）
   selectedMetrics = [],
   selectedDrivers = [],
-  nodeSelectorMode = 'auto' // 'auto' | 'manual'
+  nodeSelectorMode = 'auto', // 'auto' | 'manual'
+  // 特殊约束（B+C+D 方案）
+  specialConstraints = [],
+  // 调整模式选择（B+C+D 方案）
+  adjustmentMode = 'auto', // 'auto' | 'conservative' | 'moderate' | 'aggressive' | 'custom'
+  customRange = null, // { min: -50, max: 50 }
+  // AI 语义兜底（新增）
+  enableAIFallback = true // 是否启用 AI 语义兜底
 }) => {
   console.log('[aiPromptBuilder] 收到节点选择:', { nodeSelectorMode, selectedMetrics, selectedDrivers });
+  console.log('[aiPromptBuilder] 调整模式:', adjustmentMode, customRange);
 
   const modelStructure = buildModelStructure(nodes);
   const valueComparison = buildValueComparison(nodes, targetNodeId, targetValue);
@@ -624,6 +671,11 @@ export const buildSmartTuningPrompt = ({
   // 构建计算链 Prompt（新增）
   let calculationChainPrompt = '';
   if (calculationChain.length > 0) {
+    // 生成动态示例，基于实际模型数据
+    const firstStep = calculationChain[0];
+    const exampleTarget = firstStep ? firstStep.nodeName : '目标指标';
+    const exampleFormula = firstStep ? firstStep.formula : '';
+
     calculationChainPrompt = `\n【公式计算链与逆向推导规则】（极其重要！必须遵守！）
 
 **计算路径（从目标到驱动因子）**：
@@ -633,20 +685,11 @@ ${calculationChain.map((step, i) => `
   逆向推导：${step.inverseRules[0]?.inverse || '请根据公式反向推导'}`).join('\n')}
 
 **逆向推导强制规则**（不遵守会导致计算错误！）：
-1. **从目标值开始反向推导**：用户目标是"净利润 350 万"，你必须先计算：
-   - 营业利润 = 净利润 / 0.75 = 350 / 0.75 = 466.67 万
-   - 然后才是：收入 - 成本 - 费用 = 466.67 万（不是 350 万！）
+1. **从目标值开始反向推导**：用户目标是"${exampleTarget} XXX"，你必须先根据上述公式进行逆运算
+   - 例如：如果公式是"${exampleFormula}"，则使用对应的逆运算规则
+   - 然后才能计算驱动因子的调整值
 
-2. **错误示例**（禁止这样计算！）：
-   - ❌ 错误：营业收入 1650 - 营业成本 825 - 费用 392 = 433 万 → 这就是净利润
-   - ❌ 错误原因：433 万是营业利润，不是净利润！净利润 = 433 × 0.75 = 324.75 万
-
-3. **正确示例**（必须这样计算！）：
-   - ✓ 正确：目标净利润 350 万 → 所需营业利润 = 350 / 0.75 = 466.67 万
-   - ✓ 然后：营业收入 - 营业成本 - 费用 = 466.67 万
-   - ✓ 验证：466.67 × 0.75 = 350 万（符合目标）
-
-4. **通用逆运算规则**：
+2. **通用逆运算规则**：
    - 如果公式是 Y = X × k（k 是系数），则 X = Y / k
    - 如果公式是 Y = X / k，则 X = Y × k
    - 如果公式是 Y = X + A，则 X = Y - A
@@ -654,7 +697,7 @@ ${calculationChain.map((step, i) => `
    - 如果公式是 Y = X^n，则 X = Y^(1/n)（开方）
    - 如果公式是 Y = √X，则 X = Y²
 
-5. **计算验证步骤**（必须执行！）：
+3. **计算验证步骤**（必须执行！）：
    - 步骤 1：从用户目标值开始，用逆运算计算中间变量
    - 步骤 2：根据中间变量推导驱动因子的调整值
    - 步骤 3：用正向公式验证：驱动因子 → 中间变量 → 目标值 = 用户目标
@@ -682,16 +725,16 @@ ${calculationChain.map((step, i) => `
 用户提供了业务背景和未来计划，你需要：
 
 **首要任务：正确理解指标计算链并执行逆运算**
-1. 仔细阅读【公式计算链与逆向推导规则】部分
+1. 仔细阅读【公式计算链与逆向推导规则】部分，理解每个指标的公式和逆运算规则
 2. 从用户目标值开始，用**逆运算**计算中间变量
-   - 例如：目标净利润 350 万，公式 净利润 = 营业利润 × 0.75
-   - 逆运算：营业利润 = 350 / 0.75 = 466.67 万（不是用 收入 - 成本 - 费用 直接算！）
+   - 根据实际公式选择对应的逆运算规则（见上方通用规则）
+   - 例如：如果公式是"目标 = 中间值 × 系数"，则"中间值 = 目标 / 系数"
 3. 根据中间变量推导驱动因子的调整值
 4. 用正向公式验证：调整后的驱动因子代入公式 → 结果必须等于用户目标
 
 **关键警告**：
-- ❌ 错误：收入 1650 - 成本 825 - 费用 392 = 433 万 → "净利润 433 万"
-- ✓ 正确：目标净利润 350 万 → 营业利润 = 350 / 0.75 = 466.67 万 → 调整驱动因子使 收入 - 成本 - 费用 = 466.67 万
+- ❌ 错误：直接用"收入 - 成本 - 费用"得到结果，忽略了目标指标的公式系数
+- ✓ 正确：先通过逆运算计算中间变量，再调整驱动因子使公式成立
 
 1. 深入理解业务背景中的关键信息（时间节点、目标方向、资源约束、涉及的业务模块）
 2. 全面分析现有数据的趋势、敏感性和风险
@@ -780,11 +823,11 @@ ${selectedMetrics.map(id => `- ${nodes[id]?.name || id}`).join('\n')}
 {
   "calculationVerification": {
     "targetMetric": "净利润",
-    "targetValue": 350,
-    "formula": "净利润 = 营业利润 × 0.75",
-    "inverseStep1": "营业利润 = 350 / 0.75 = 466.67 万",
-    "driverDerivation": "营业收入 1650 - 营业成本 875 - 销售费用 256 - 管理费用 52.33 = 466.67 万",
-    "finalVerification": "466.67 × 0.75 = 350 万 ✓"
+    "targetValue": X,
+    "formula": "",
+    "inverseStep1": "营业利润 = X / 0.75 = Y 万",
+    "driverDerivation": "营业收入 A - 营业成本 B - 销售费用 C - 管理费用 D = Y 万",
+    "finalVerification": "Y × 0.75 = X 万 ✓"
   },
   "understanding": {
     "businessContext": "AI 对业务背景的理解摘要",
@@ -972,12 +1015,24 @@ ${scenarioPrompt}`
     userPrompt += `【关键信息】\n${businessContext.summary}\n\n`;
   }
 
+  // 场景判断：如果没有目标值，明确告诉 AI 这是约束驱动型
+  if (!targetNode && businessContext?.rawText) {
+    userPrompt += `【场景类型判断】
+**约束驱动型**：用户未指定明确的目标值，只给出了调整约束。
+**处理规则**：直接根据用户约束调整驱动因子，无需逆向推导，不要编造目标值！
+
+`;
+  }
+
   if (targetNode) {
     userPrompt += `【优化目标】\n目标指标：${targetNode.name}\n`;
-    if (targetValue !== null) {
+    if (targetValue !== null && targetValue !== undefined) {
       userPrompt += `目标值：${targetValue}${targetNode.unit || ''}\n`;
       userPrompt += `当前值：${targetNode.value ?? 0}${targetNode.unit || ''}\n`;
       userPrompt += `差距：${targetValue - (targetNode.value ?? 0)}${targetNode.unit || ''}\n`;
+      userPrompt += `**说明**：这是一个**目标优化型**场景，请使用逆向推导规则。\n`;
+    } else {
+      userPrompt += `**说明**：未指定具体目标值，这是一个**约束驱动型**场景，请直接根据约束条件调整。\n`;
     }
     userPrompt += '\n';
   }
@@ -990,39 +1045,119 @@ ${scenarioPrompt}`
     userPrompt += '\n';
   }
 
+  // 特殊约束（B+C+D 方案）
+  if (specialConstraints && specialConstraints.length > 0) {
+    userPrompt += `【用户指定的特殊约束】（必须严格遵守！）\n`;
+    specialConstraints.forEach((c, i) => {
+      // 使用语义化的约束描述
+      const constraintDesc = formatConstraintDescription(c);
+      userPrompt += `${i + 1}. ${c.factorName}: ${constraintDesc}\n`;
+    });
+
+    // 如果有计算指标约束，添加逆向推导说明
+    const hasComputedConstraints = specialConstraints.some(c => c.isComputed);
+    if (hasComputedConstraints) {
+      userPrompt += `\n**重要**：
+- 上述约束中涉及计算指标（如毛利率、净利率等），请根据【公式计算链】逆向推导驱动因子！
+- 例如："毛利率增加 5 个百分点" →
+  1. 先计算新毛利率 = 原毛利率 (50%) + 5% = 55%
+  2. 根据公式"毛利率 = 毛利润/营业收入"推导
+  3. 如果营业收入保持 1450 万，则毛利润 = 1450 × 55% = 797.5 万
+  4. 营业成本 = 营业收入 - 毛利润 = 1450 - 797.5 = 652.5 万
+  5. **不要直接把毛利润设为 100 万**！这是错误的！
+- 这些约束优先于默认约束范围，AI 分析时必须首先满足！\n\n`;
+    } else {
+      userPrompt += `\n**重要**：上述特殊约束优先于默认约束范围（±5%/±10%/±30%/±50%），AI 分析时必须首先满足这些约束！\n\n`;
+    }
+  }
+
+  // 方案 3：让 AI 也从业务背景中自动提取约束（双重保障）
+  if (enableAIFallback) {
+    userPrompt += `【AI 自动提取约束】（辅助功能）
+除了上述用户明确指定的约束外，请你还必须：
+1. 仔细阅读业务背景描述，识别其中隐含的约束条件
+2. 注意以下关键词可能表示约束：
+   - 范围类：控制在、不超过、不低于、至少、最多、在...之间、≥、≤、>、<
+   - 趋势类：增长、降低、提升、减少、增加、压缩、削减
+   - 允许类：允许、可以、可、能
+   - 强制类：必须、需要、要、应、务必
+3. 例如："毛利率增加 5%"可能是从 50%→55%（百分点），也可能是 50%→52.5%（增幅 5%）
+   - 如果是百分点变化：新值 = 原值 + 5
+   - 如果是百分比增幅：新值 = 原值 × (1 + 5%)
+4. 对于"XX 万"、"XX 元"等绝对额约束，请直接使用数值
+5. 将提取到的约束应用到调整方案中
+
+`;
+  } else {
+    userPrompt += `【AI 自动提取约束】已禁用
+用户未启用 AI 语义兜底功能，请仅根据上述用户明确指定的约束进行分析。
+
+`;
+  }
+
+  // 调整模式约束（B+C+D 方案）
+  const modeDescriptions = {
+    auto: { desc: '自动模式（根据目标差距动态调整）', range: '动态' },
+    conservative: { desc: '保守型', range: '±10%' },
+    moderate: { desc: '稳健型', range: '±30%' },
+    aggressive: { desc: '进取型', range: '±50%' },
+    custom: { desc: '自定义', range: customRange ? `${customRange.min}% ~ ${customRange.max}%` : '±50%' }
+  };
+  const currentMode = modeDescriptions[adjustmentMode] || modeDescriptions.auto;
+
+  userPrompt += `【调整幅度约束】
+用户选择的调整模式：**${currentMode.desc}**
+- 所有驱动因子的调整幅度应在 **${currentMode.range}** 范围内
+- 这是用户对调整可行性的要求，请务必遵守
+- 如果业务目标需要超出此范围的调整，请在 explanation 中说明理由
+
+`;
+
   userPrompt += `请基于以上信息，生成完整的智能调参方案。
 
-【逆向推导强制规则】（极其重要！必须先逆向后推导！）
+【输出数量要求】（必须遵守！）
+- 必须返回 **至少 3-5 个驱动因子的调整方案**
+- 如果返回的调整方案少于 2 个，系统会自动使用兜底策略（可能不遵守您的约束）
+- 因此，请务必分析多个驱动因子，提供充足的调整建议
 
-**计算步骤**（必须严格按此顺序执行！）：
-1. **步骤 1：识别用户目标值**
-   - 例如：用户目标是"净利润 350 万"
+【计算规则】（根据场景类型选择适用规则！）
 
-2. **步骤 2：从【公式计算链】中查找目标指标的公式**
-   - 例如：净利润 = 营业利润 × 0.75
+**场景判断**（首先判断用户输入属于哪种类型！）：
+1. **目标优化型**：用户明确指定了目标值
+   - 识别关键词："达到"、"目标"、"提升至"、"突破"、"不低于"
+   - 例如："净利润达到 500 万"、"毛利率提升至 55%"、"收入突破 2000 万"
+   - 特征：有明确的数字目标
 
-3. **步骤 3：使用逆运算计算中间变量**（关键！）
-   - 例如：营业利润 = 净利润 / 0.75 = 350 / 0.75 = 466.67 万
-   - 注意：不是用 收入 - 成本 - 费用 直接计算！
+2. **约束驱动型**：用户只指定了调整约束，没有目标值
+   - 识别关键词："增加"、"减少"、"控制在"、"不超过"、"降低"
+   - 例如："毛利率增加 5 个百分点"、"管理费用控制在 100 万以内"
+   - 特征：只有调整方向/幅度，没有最终目标值
 
-4. **步骤 4：从中间变量推导驱动因子的调整值**
-   - 例如：收入 - 成本 - 费用 = 466.67 万（不是 350 万！）
+**目标优化型 - 逆向推导规则**（仅当识别到明确目标值时使用！）：
+1. 从上述【优化目标】中获取用户目标值
+2. 从【公式计算链】中查找目标指标的公式
+3. 使用逆运算计算中间变量（例如：目标 = 中间值 × 系数 → 中间值 = 目标 / 系数）
+4. 从中间变量推导驱动因子的调整值
+5. 正向验证：计算结果是否等于用户目标？
 
-5. **步骤 5：正向验证**（必须执行！）
-   - 用你的调整方案代入正向公式：
-   - 营业利润 = 调整后收入 - 调整后成本 - 调整后费用
-   - 净利润 = 营业利润 × 0.75
-   - 验证：计算结果是否等于用户目标 350 万？
-   - 如果不等于，重新调整！
+**约束驱动型 - 直接调整规则**（当用户只给出约束时使用！）：
+1. 直接从【用户指定的特殊约束】或【业务背景】中提取调整指令
+2. **区分计算指标和驱动因子**：
+   - 如果约束涉及计算指标（如毛利率、净利率、人均效能等）：
+     * 步骤 1：先计算计算指标的新值（如：新毛利率 = 原毛利率 + 5%）
+     * 步骤 2：根据公式逆向推导需要调整的驱动因子
+     * 例如："毛利率增加 5 个百分点" → 新毛利率 = 50% + 5% = 55%
+     * 公式：毛利率 = 毛利润 / 营业收入
+     * 推导：要保持毛利率 55%，如果营业收入=1450 万，则毛利润=1450×0.55=797.5 万
+     * 营业成本 = 营业收入 - 毛利润 = 1450 - 797.5 = 652.5 万
+   - 如果约束涉及驱动因子（如管理费用、销售费用等）：
+     * 直接应用约束到对应因子
+     * 例如："管理费用控制在 100 万以内" → 管理费用 ≤ 100
+3. 验证：调整后的值是否满足约束条件？
 
-**错误示例**（禁止这样计算！）：
-- ❌ 调整后收入 1650 - 成本 825 - 费用 392 = 433 万 → "这就是净利润"
-- ❌ 错误原因：433 万是营业利润！净利润 = 433 × 0.75 = 324.75 万 ≠ 目标 350 万
-
-**正确示例**（必须这样计算！）：
-- ✓ 目标净利润 350 万 → 所需营业利润 = 350 / 0.75 = 466.67 万
-- ✓ 然后调整驱动因子使：收入 - 成本 - 费用 = 466.67 万
-- ✓ 验证：466.67 × 0.75 = 350 万 ✓
+**重要提醒**：
+- 如果【优化目标】为空或没有明确目标值，请使用**约束驱动型**规则！
+- 不要编造目标值！如果用户没有说"净利润达到 X 万"，就不要假设！
 
 【极其重要的多因子要求】
 1. **不要只调整一个营业收入！** 业务目标需要多个因子协同调整
@@ -1078,22 +1213,21 @@ ${scenarioPrompt}`
 5. 提供乐观/基准/悲观三种情景的预期效果
 
 
-【关键计算验证】
-在生成调整方案后，你必须进行以下验证：
+【关键计算验证】（仅当用户明确指定目标值时才执行！）
 
-1. **目标识别**：从业务背景中识别用户的目标指标和目标值
-   - 如"净利润达到 350 万"→目标指标是净利润，目标值是 350 万
-   - 如"毛利率提升至 55%"→目标指标是毛利率，目标值是 55%
-   - 如"收入突破 2000 万"→目标指标是营业收入，目标值是 2000 万
+**判断：用户是否指定了明确的目标值？**
+- 检查【优化目标】部分是否有内容
+- 检查业务背景中是否有"达到"、"提升至"、"突破"等关键词 + 数字
 
-2. **公式系数识别**（极其重要！）
+**如果用户指定了目标值**（目标优化型）
+
+1. **公式系数识别**（极其重要！）
    - 如果目标指标公式中包含系数（如税率、毛利率等），计算时**必须使用这些系数**！
-   - 例如：净利润 = 营业利润 × 0.75（税率 25%）
-     - **正向计算**：营业利润 466.67 × 0.75 = 净利润 350 ✓
-     - **反向推导**：如果目标净利润 350，则 所需营业利润 = 350 ÷ 0.75 = 466.67
-   - 你看到的"目标指标公式"中，系数（如 0.75、0.25 等）是公式的一部分，必须参与计算！
+   - 例如：如果公式是"目标 = 中间值 × 系数"（税率 25%）
+     - **正向计算**：营业利润 Y × 0.75 = 净利润 X ✓
+     - **反向推导**：如果目标净利润 X，则 所需营业利润 = X ÷ 0.75 = Y
 
-3. **计算验证**：根据调整方案计算预期结果
+2. **计算验证**：根据调整方案计算预期结果
    - 如果公式是 A = B × C，则 B = A / C，C = A / B
    - 如果公式是 A = B × 系数，则 B = A / 系数
    - 例如：
@@ -1101,20 +1235,32 @@ ${scenarioPrompt}`
      - 毛利润 = 营业收入 × 毛利率 → 营业收入 = 毛利润 / 毛利率
    - 根据 adjustments 中的推荐值，使用正确的公式计算目标指标的预期值
 
-4. **差距分析**：对比预期值与目标值
+3. **差距分析**：对比预期值与目标值
    - 如果预期值 >= 目标值：说明方案可以达成目标
    - 如果预期值 < 目标值：说明方案**无法达成目标**，必须在 explanation 中明确说明
 
-5. **不达标处理**：如果无法达成目标，必须在 explanation 中说明：
+4. **不达标处理**：如果无法达成目标，必须在 explanation 中说明：
    - 当前方案的预期结果是什么
    - 距离目标还差多少
-   - 建议用户如何调整（如"需要额外增加收入 XX 万"或"需要降低费用 XX 万"）
-   - 或者明确告知"根据当前条件，目标无法达成"
+   - 建议用户如何调整
 
-示例说明：
-- 如果用户要求净利润 350 万，公式是 净利润 = 营业利润 × 0.75：
-  - 正确计算：所需营业利润 = 350 / 0.75 = 466.67 万
-  - 错误计算：营业利润 = 350 万（忽略了 0.75 系数）✗`;
+**如果用户没有指定目标值**（约束驱动型）
+
+1. **约束满足验证**（必须执行！）
+   - 检查每个调整后的驱动因子是否满足用户指定的约束
+   - 例如：用户说"管理费用控制在 100 万以内" → 调整后管理费用 ≤ 100
+   - 例如：用户说"毛利率增加 5 个百分点" → 新毛利率 = 原毛利率 + 5%
+
+2. **直接应用约束**：
+   - "增加 X 个百分点" → 新值 = 原值 + X（用于比率类指标）
+   - "增加 X%" → 新值 = 原值 × (1 + X%)（用于绝对值指标）
+   - "控制在 X 以内" → 新值 ≤ X
+   - "降低到 X" → 新值 = X
+
+3. **在 explanation 中说明**：
+   - 说明这是约束驱动型调整
+   - 列出所有约束条件及其满足情况
+   - 说明调整后的预期效果（如净利润变化）`;
   return {
     system: systemPrompt,
     user: userPrompt,
@@ -1581,6 +1727,105 @@ const tryParseJson = (response) => {
             partialResult.understanding = JSON.parse('{' + cleaned + '}').understanding;
             console.log('成功提取 understanding (简化方式)');
           } catch {}
+        }
+      }
+
+      // 新增策略 4：提取 expectedImpact 和 sensitivityScenario
+      console.log('tryParseJson: 尝试提取 expectedImpact 和 sensitivityScenario...');
+
+      // 提取 expectedImpact.keyMetrics
+      const keyMetricsRegex = /"expectedImpact"\s*:\s*\{[^}]*"keyMetrics"\s*:\s*(\[[\s\S]*?\])/;
+      const keyMetricsMatch = truncated.match(keyMetricsRegex);
+      if (keyMetricsMatch && keyMetricsMatch[1]) {
+        try {
+          const cleanedKeyMetrics = keyMetricsMatch[1].replace(/\n/g, '').replace(/\s+/g, ' ');
+          partialResult.expectedImpact = partialResult.expectedImpact || {};
+          partialResult.expectedImpact.keyMetrics = JSON.parse(cleanedKeyMetrics);
+          console.log('成功提取 expectedImpact.keyMetrics:', partialResult.expectedImpact.keyMetrics?.length, '个');
+        } catch (e) {
+          console.log('提取 keyMetrics 失败:', e.message);
+        }
+      }
+
+      // 提取 expectedImpact.sensitivityScenario
+      const sensitivityScenarioRegex = /"sensitivityScenario"\s*:\s*(\[[\s\S]*?\])/;
+      const sensitivityScenarioMatch = truncated.match(sensitivityScenarioRegex);
+      if (sensitivityScenarioMatch && sensitivityScenarioMatch[1]) {
+        try {
+          const cleanedScenario = sensitivityScenarioMatch[1].replace(/\n/g, '').replace(/\s+/g, ' ');
+          if (!partialResult.expectedImpact) partialResult.expectedImpact = {};
+          partialResult.expectedImpact.sensitivityScenario = JSON.parse(cleanedScenario);
+          console.log('成功提取 sensitivityScenario:', partialResult.expectedImpact.sensitivityScenario?.length, '个');
+        } catch (e) {
+          console.log('提取 sensitivityScenario 失败:', e.message);
+          // 尝试更简单的方式：找到数组开始和最近的有效结束
+          const scenarioStart = truncated.indexOf('"sensitivityScenario"');
+          if (scenarioStart !== -1) {
+            const arrayStart = truncated.indexOf('[', scenarioStart);
+            if (arrayStart !== -1) {
+              // 尝试找到最近的有效结束位置
+              const possibleEnds = ['}]', ']', '}'];
+              for (const end of possibleEnds) {
+                const endIndex = truncated.indexOf(end, arrayStart);
+                if (endIndex !== -1) {
+                  try {
+                    const scenarioStr = truncated.substring(arrayStart, endIndex + (end === '}]' ? 2 : 1));
+                    const cleaned = scenarioStr.replace(/\n/g, ' ').replace(/\s+/g, ' ');
+                    const parsed = JSON.parse(cleaned);
+                    if (Array.isArray(parsed) && parsed.length > 0) {
+                      partialResult.expectedImpact = partialResult.expectedImpact || {};
+                      partialResult.expectedImpact.sensitivityScenario = parsed;
+                      console.log('成功提取 sensitivityScenario (简化方式):', parsed.length, '个');
+                      break;
+                    }
+                  } catch {}
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // 提取 expectedImpact.summary
+      const summaryRegex = /"summary"\s*:\s*"([^"]+)"/;
+      const summaryMatch = truncated.match(summaryRegex);
+      if (summaryMatch && summaryMatch[1]) {
+        if (!partialResult.expectedImpact) partialResult.expectedImpact = {};
+        partialResult.expectedImpact.summary = summaryMatch[1];
+        console.log('成功提取 summary:', partialResult.expectedImpact.summary);
+      }
+
+      // 提取 explanation
+      const explanationRegex = /"explanation"\s*:\s*"([\s\S]*?)"/;
+      const explanationMatch = truncated.match(explanationRegex);
+      if (explanationMatch && explanationMatch[1]) {
+        partialResult.explanation = explanationMatch[1];
+        console.log('成功提取 explanation');
+      }
+
+      // 提取 adjustmentDetails
+      const adjustmentDetailsRegex = /"adjustmentDetails"\s*:\s*(\[[\s\S]*?\])/;
+      const adjustmentDetailsMatch = truncated.match(adjustmentDetailsRegex);
+      if (adjustmentDetailsMatch && adjustmentDetailsMatch[1]) {
+        try {
+          const cleanedDetails = adjustmentDetailsMatch[1].replace(/\n/g, '').replace(/\s+/g, ' ');
+          partialResult.adjustmentDetails = JSON.parse(cleanedDetails);
+          console.log('成功提取 adjustmentDetails:', partialResult.adjustmentDetails?.length, '个');
+        } catch (e) {
+          console.log('提取 adjustmentDetails 失败:', e.message);
+        }
+      }
+
+      // 提取 dataAnalysis
+      const dataAnalysisRegex = /"dataAnalysis"\s*:\s*(\{[\s\S]*?\})/;
+      const dataAnalysisMatch = truncated.match(dataAnalysisRegex);
+      if (dataAnalysisMatch && dataAnalysisMatch[1]) {
+        try {
+          const cleanedDataAnalysis = dataAnalysisMatch[1].replace(/\n/g, '').replace(/\s+/g, ' ');
+          partialResult.dataAnalysis = JSON.parse(cleanedDataAnalysis);
+          console.log('成功提取 dataAnalysis');
+        } catch (e) {
+          console.log('提取 dataAnalysis 失败:', e.message);
         }
       }
 

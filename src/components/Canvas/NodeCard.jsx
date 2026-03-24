@@ -14,6 +14,11 @@ const NodeCard = ({ node, allNodes, onSelect, isSelected, onValueChange, onDelet
     setLocalInputValue(null);
   }, [node.value]);
 
+  // 当节点的 adjustmentDescription 从外部更新时，同步到本地状态
+  React.useEffect(() => {
+    setAdjustmentDescription(node.adjustmentDescription || '');
+  }, [node.adjustmentDescription]);
+
   const [isMonthEditMode, setIsMonthEditMode] = useState(false);
   const [monthEdits, setMonthEdits] = useState({});
   const [selectedMonths, setSelectedMonths] = useState([]);
@@ -21,6 +26,9 @@ const NodeCard = ({ node, allNodes, onSelect, isSelected, onValueChange, onDelet
   const [editingValue, setEditingValue] = useState('');
   const [isWeightEditMode, setIsWeightEditMode] = useState(false);
   const [monthWeights, setMonthWeights] = useState({});
+  const [isDescriptionEditMode, setIsDescriptionEditMode] = useState(false);
+  const [adjustmentDescription, setAdjustmentDescription] = useState(node.adjustmentDescription || '');
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
   const cardRef = useRef(null);
   const resizeStartRef = useRef({ x: 0, y: 0, width: 0, height: 0 });
   const lastClickTimeRef = useRef(0);
@@ -265,10 +273,39 @@ const NodeCard = ({ node, allNodes, onSelect, isSelected, onValueChange, onDelet
   const handleResetInitial = useCallback((e) => {
     e.stopPropagation();
     if (initialBaseline !== null && initialBaseline !== undefined && !isNaN(initialBaseline)) {
-      setLocalInputValue(null);
-      onValueChange(node.id, initialBaseline);
+      // 如果有调整描述，显示选择对话框
+      if (adjustmentDescription && adjustmentDescription.trim() !== '') {
+        setShowResetConfirm(true);
+      } else {
+        setLocalInputValue(null);
+        onValueChange(node.id, initialBaseline);
+      }
     }
+  }, [initialBaseline, node.id, onValueChange, adjustmentDescription]);
+
+  // 确认重置（仅重置数据）
+  const handleResetDataOnly = useCallback((e) => {
+    e?.stopPropagation();
+    setShowResetConfirm(false);
+    setLocalInputValue(null);
+    onValueChange(node.id, initialBaseline);
+    // 保留描述，不清空
   }, [initialBaseline, node.id, onValueChange]);
+
+  // 确认重置（数据和描述同步重置）
+  const handleResetDataAndDescription = useCallback((e) => {
+    e?.stopPropagation();
+    setShowResetConfirm(false);
+    setLocalInputValue(null);
+    setAdjustmentDescription('');
+    onValueChange(node.id, initialBaseline, { adjustmentDescription: '' });
+  }, [initialBaseline, node.id, onValueChange]);
+
+  // 取消重置
+  const handleCancelReset = useCallback((e) => {
+    e?.stopPropagation();
+    setShowResetConfirm(false);
+  }, []);
 
   // ========== 月份调整相关 ==========
   // 处理单个月份值变化
@@ -637,6 +674,34 @@ const NodeCard = ({ node, allNodes, onSelect, isSelected, onValueChange, onDelet
     setMonthWeights(weights);
   }, [monthEdits]);
 
+  // ========== 调整描述相关 ==========
+  // 切换描述编辑模式
+  const toggleDescriptionEditMode = useCallback((e) => {
+    e.stopPropagation();
+    if (!isDescriptionEditMode && onBringNodeToFront) {
+      onBringNodeToFront();
+    }
+    setIsDescriptionEditMode(!isDescriptionEditMode);
+  }, [isDescriptionEditMode, onBringNodeToFront]);
+
+  // 保存调整描述
+  const handleSaveDescription = useCallback((e) => {
+    e.stopPropagation();
+    if (onValueChange) {
+      // 通过 onValueChange 传递描述更新（特殊的 updates 对象）
+      onValueChange(node.id, node.value, { adjustmentDescription });
+    }
+    setIsDescriptionEditMode(false);
+  }, [node.id, node.value, adjustmentDescription, onValueChange]);
+
+  // AI 一键应用时自动填充描述
+  const handleAutoFillDescription = useCallback((aiReason) => {
+    setAdjustmentDescription(aiReason);
+    if (onValueChange) {
+      onValueChange(node.id, node.value, { adjustmentDescription: aiReason });
+    }
+  }, [node.id, node.value, onValueChange]);
+
   // 月份输入框键盘快捷键
   const handleMonthKeyDown = useCallback((monthKey, e) => {
     e.stopPropagation();
@@ -884,6 +949,16 @@ const NodeCard = ({ node, allNodes, onSelect, isSelected, onValueChange, onDelet
               ✨ 已修改
             </span>
           )}
+          {isDriver && hasChanges && !adjustmentDescription && (
+            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-700" title="此调整尚未添加描述，建议补充调整理由和预期效果">
+              ⚠️ 未添加描述
+            </span>
+          )}
+          {isDriver && adjustmentDescription && (
+            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700" title="已添加调整描述">
+              📝 已描述
+            </span>
+          )}
           {!isDriver && node.dependsOn && node.dependsOn.length > 0 && (
             <button
               onClick={(e) => { e.stopPropagation(); onToggleCollapse && onToggleCollapse(); }}
@@ -1015,6 +1090,13 @@ const NodeCard = ({ node, allNodes, onSelect, isSelected, onValueChange, onDelet
                     title="按权重分配总额"
                   >
                     ⚖️ 权重分配
+                  </button>
+                  <button
+                    onClick={toggleDescriptionEditMode}
+                    className={`text-xs px-2 py-1 rounded flex items-center gap-1 ${isDescriptionEditMode ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}
+                    title="添加或查看调整理由和摘要"
+                  >
+                    📝 调整描述
                   </button>
                 </div>
                 {isMonthEditMode && (
@@ -1320,6 +1402,121 @@ const NodeCard = ({ node, allNodes, onSelect, isSelected, onValueChange, onDelet
                 </div>
               )}
 
+              {/* 调整描述面板 */}
+              {isDescriptionEditMode && (
+                <div className="mb-3 p-3 bg-green-50 rounded-lg border border-green-200">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-medium text-green-700">📝 调整描述</span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={() => {
+                          const template = `【业务理由】
+（填写调整的业务背景和原因，例如：Q4 销售旺季，需加大市场推广力度）
+
+【数据依据】
+（填写数据支撑，例如：历史同期销售费用投入产出比为 1:5，敏感性分析显示该因子敏感度为 0.85）
+
+【预期效果】
+（填写预期达成的效果，例如：GMV 提升 18%，净利润提升 15%）
+
+【风险提示】
+（填写可能的风险，例如：费用投入后若市场反应不及预期，可能影响利润目标）`;
+                          setAdjustmentDescription(template);
+                        }}
+                        className="text-xs px-2 py-1 bg-indigo-100 text-indigo-600 rounded hover:bg-indigo-200"
+                        title="插入通用描述模板，包含业务理由、数据依据、预期效果、风险提示四个维度"
+                      >
+                        📋 插入模板
+                      </button>
+                      <button
+                        onClick={() => {
+                          setAdjustmentDescription('');
+                        }}
+                        className="text-xs px-2 py-1 bg-red-100 text-red-600 rounded hover:bg-red-200"
+                        title="清空调整描述"
+                      >
+                        🗑️ 清空
+                      </button>
+                      <button
+                        onClick={handleSaveDescription}
+                        className="text-xs px-2 py-1 bg-green-600 text-white rounded hover:bg-green-700"
+                        title="保存调整描述"
+                      >
+                        保存
+                      </button>
+                    </div>
+                  </div>
+                  <textarea
+                    value={adjustmentDescription}
+                    onChange={(e) => setAdjustmentDescription(e.target.value)}
+                    onMouseDown={(e) => {
+                      e.stopPropagation();
+                      e.nativeEvent.stopImmediatePropagation();
+                    }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      e.nativeEvent.stopImmediatePropagation();
+                    }}
+                    placeholder="请输入调整理由、摘要要点等信息...\n\n例如：\n- 调整理由：Q4 销售旺季，加大市场推广力度\n- 预期效果：GMV 提升 18%，净利润提升 15%\n- 关键措施：增加广告投放，优化渠道结构"
+                    className="w-full h-32 px-2 py-2 border border-green-300 rounded text-xs focus:ring-2 focus:ring-green-500 resize-y"
+                    style={{ fontFamily: 'inherit', whiteSpace: 'pre-wrap' }}
+                  />
+                  <div className="mt-2 text-xs text-green-600 flex items-center gap-1">
+                    <span className="font-medium">💡 提示：</span>
+                    <span>记录调整理由和预期效果，便于后续复盘和追溯</span>
+                    {adjustmentDescription && adjustmentDescription.includes('AI 决策') && (
+                      <span className="ml-2 px-1.5 py-0.5 bg-indigo-100 text-indigo-700 rounded text-[9px]">
+                        🤖 AI 生成
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* 调整描述摘要显示（非编辑模式） */}
+              {!isDescriptionEditMode && adjustmentDescription && (
+                <div className="mb-3 p-2 bg-green-50 rounded-lg border border-green-200">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-1">
+                      <span className="text-xs font-medium text-green-700">📝 调整描述</span>
+                      {adjustmentDescription.includes('AI 决策') && (
+                        <span className="px-1 py-0.5 bg-indigo-100 text-indigo-700 rounded text-[9px]">
+                          🤖 AI 生成
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={() => {
+                          setAdjustmentDescription('');
+                          if (onValueChange) {
+                            onValueChange(node.id, node.value, { adjustmentDescription: '' });
+                          }
+                        }}
+                        className="text-xs text-red-600 hover:text-red-800"
+                        title="删除调整描述"
+                      >
+                        🗑️ 删除
+                      </button>
+                      <button
+                        onClick={toggleDescriptionEditMode}
+                        className="text-xs text-green-600 hover:text-green-800"
+                        title="编辑调整描述"
+                      >
+                        编辑
+                      </button>
+                    </div>
+                  </div>
+                  <div className="mt-1 text-xs text-gray-700 whitespace-pre-wrap line-clamp-2">
+                    {adjustmentDescription.length > 100
+                      ? adjustmentDescription.substring(0, 100) + '...'
+                      : adjustmentDescription}
+                  </div>
+                </div>
+              )}
+
               <div className="flex items-center gap-3">
                 <input
                   type="range"
@@ -1453,6 +1650,41 @@ const NodeCard = ({ node, allNodes, onSelect, isSelected, onValueChange, onDelet
       >
         ◢
       </div>
+
+      {/* 重置确认对话框 */}
+      {showResetConfirm && (
+        <div className="absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center rounded-lg z-50">
+          <div className="bg-white rounded-lg p-4 max-w-sm mx-4 shadow-xl">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="text-lg">🔄</span>
+              <span className="font-medium text-gray-800">重置确认</span>
+            </div>
+            <div className="text-sm text-gray-600 mb-4">
+              检测到当前有调整描述，请选择：
+            </div>
+            <div className="space-y-2">
+              <button
+                onClick={handleResetDataOnly}
+                className="w-full px-3 py-2 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 text-sm font-medium"
+              >
+                📊 仅重置数据（保留描述）
+              </button>
+              <button
+                onClick={handleResetDataAndDescription}
+                className="w-full px-3 py-2 bg-red-100 text-red-700 rounded hover:bg-red-200 text-sm font-medium"
+              >
+                🗑️ 数据和描述同步重置
+              </button>
+              <button
+                onClick={handleCancelReset}
+                className="w-full px-3 py-2 bg-gray-100 text-gray-600 rounded hover:bg-gray-200 text-sm"
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

@@ -42,7 +42,9 @@ const Toolbar = ({
   showKnowledgeBase,
   onOpenScenarioSelector,
   onOpenRulePanel,
-  showRulePanel
+  showRulePanel,
+  onOpenAliasPanel,
+  showAliasPanel
 }) => {
   // 获取模型数据检查是否已加载
   const nodes = useVDTStore((s) => s.nodes);
@@ -51,12 +53,20 @@ const Toolbar = ({
   return (
     <div className="h-14 bg-white border-b px-4 flex items-center justify-between shadow-sm">
       <div className="flex items-center gap-3">
-        <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold">
-          V
-        </div>
-        <div>
-          <h1 className="text-lg font-bold text-gray-800">VDT</h1>
-          <p className="text-xs text-gray-500">驱动型业务规划工具</p>
+        <div style={{display:'flex',alignItems:'center',gap:'12px',fontFamily:'system-ui,Segoe UI,Roboto,sans-serif'}}>
+          <div style={{width:'40px',height:'40px',position:'relative'}}>
+            <div style={{position:'absolute',inset:0,border:'2px solid #0066FF',borderRadius:'50%'}}></div>
+            <div className="aidm-logo-spin" style={{position:'absolute',inset:'5px',border:'2px solid #0066FF',borderRadius:'50%',borderRightColor:'transparent',borderBottomColor:'transparent'}}></div>
+            <div style={{position:'absolute',top:'50%',left:'50%',width:'16px',height:'16px',transform:'translate(-50%,-50%)'}}>
+              <svg viewBox="0 0 24 24" fill="#0066FF">
+                <path d="M12 2C9.04 2 6.6 3.65 5.36 6.23C3.86 6.79 2.9 8.24 2.9 9.5C2.9 11.26 4.24 12.6 5.99 12.6C6.16 12.6 6.33 12.58 6.5 12.55V13.5C6.5 15.26 7.74 16.5 9.5 16.5H10.5V17.5C10.5 19.26 11.74 20.5 13.5 20.5C15.26 20.5 16.5 19.26 16.5 17.5V16.14C18.03 15.13 19 13.45 19 11.5C19 7.91 15.86 5 12 5M13 3.05V5.08C15.5 5.5 17.5 7.6 17.5 11.5C17.5 13.43 16.5 15.13 15 16.14V17.5C15 18.33 14.33 19 13.5 19C12.67 19 12 18.33 12 17.5V16.5C12 15.67 12.67 15 13.5 15H14.5V14H13.5C11.67 14 10.5 15.67 10.5 17.5V16.5C9.67 16.5 8.5 15.33 8.5 13.5V12.5H9.5C10.33 12.5 11.5 10.83 11.5 9H10.5C9.67 9 8.5 10.67 8.5 12.5H7.5V11.5C7.5 9.67 6.33 8.5 4.5 8.5C3.67 8.5 2.9 9.17 2.9 10C2.9 10.83 3.67 11.5 4.5 11.5C5.33 11.5 6.5 9.83 6.5 8H7.5C8.33 8 9.5 9.67 9.5 11.5H10.5V10.5C10.5 8.67 11.67 7.5 13.5 7.5C15.33 7.5 16.5 5.83 16.5 4V3.05C14.88 2.33 13.44 2 12 2Z" />
+              </svg>
+            </div>
+          </div>
+          <div style={{lineHeight:'1.2'}}>
+            <div style={{fontSize:'24px',fontWeight:'700',color:'#121212',letterSpacing:'1px'}}>AIDM</div>
+            <div style={{fontSize:'11px',color:'#666'}}>智能指标规划决策引擎</div>
+          </div>
         </div>
 
         {/* 方案管理器 */}
@@ -165,6 +175,7 @@ const Toolbar = ({
                 <div className="text-xs text-gray-500">智能调整驱动因子</div>
               </span>
             </button>
+            <div className="border-t my-1" />
             <button
               onClick={onOpenKnowledgeBase}
               className="w-full px-4 py-2 text-left hover:bg-gray-50 text-sm flex items-center gap-2"
@@ -173,6 +184,16 @@ const Toolbar = ({
               <span>
                 <div className="font-medium">知识库</div>
                 <div className="text-xs text-gray-500">管理历史案例</div>
+              </span>
+            </button>
+            <button
+              onClick={onOpenScenarioSelector}
+              className="w-full px-4 py-2 text-left hover:bg-gray-50 text-sm flex items-center gap-2"
+            >
+              <span>📋</span>
+              <span>
+                <div className="font-medium">场景选择</div>
+                <div className="text-xs text-gray-500">管理 AI 场景模板</div>
               </span>
             </button>
             <button
@@ -185,15 +206,14 @@ const Toolbar = ({
                 <div className="text-xs text-gray-500">配置约束映射规则</div>
               </span>
             </button>
-            <div className="border-t my-1" />
             <button
-              onClick={onOpenScenarioSelector}
+              onClick={onOpenAliasPanel}
               className="w-full px-4 py-2 text-left hover:bg-gray-50 text-sm flex items-center gap-2"
             >
-              <span>📋</span>
+              <span>🏷️</span>
               <span>
-                <div className="font-medium">场景选择</div>
-                <div className="text-xs text-gray-500">管理 AI 场景模板</div>
+                <div className="font-medium">别名管理</div>
+                <div className="text-xs text-gray-500">配置因子别名映射</div>
               </span>
             </button>
             </div>

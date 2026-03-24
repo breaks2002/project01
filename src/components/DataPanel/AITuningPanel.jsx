@@ -13,6 +13,7 @@ import { parseConstraints } from '../../utils/constraintParser';
 import NodeSelector from './NodeSelector';
 import { TEST_VERSION } from '../../test-version';
 import ConstraintRulePanel from './ConstraintRulePanel';
+import FactorAliasPanel from './FactorAliasPanel';
 
 // ===== 调试日志：验证代码加载 =====
 console.log('[AITuningPanel] 模块加载成功！DEBUG-20260317-NEW'); console.warn('⚠️️⚠️ DEBUG LOG - 如果看到这个说明代码已加载 ⚠️️⚠️！时间:', new Date().toLocaleTimeString());
@@ -76,6 +77,7 @@ const AITuningPanel = ({ onClose, onBringToFront, selectedScenarios = [] }) => {
   const [showSavePrompt, setShowSavePrompt] = useState(false);
   const [appliedCount, setAppliedCount] = useState(0);
   const [showRulePanel, setShowRulePanel] = useState(false); // 规则管理面板
+  const [showAliasPanel, setShowAliasPanel] = useState(false); // 别名管理面板
   const [enableAIFallback, setEnableAIFallback] = useState(true); // AI 语义兜底，默认启用
 
   // 节点选择状态
@@ -128,6 +130,14 @@ const AITuningPanel = ({ onClose, onBringToFront, selectedScenarios = [] }) => {
   const [selectedKnowledgeEntries, setSelectedKnowledgeEntries] = useState([]);
   const [restoredScenarios, setRestoredScenarios] = useState([]); // 从 localStorage 恢复的场景
 
+  // ===== 即时检测功能：因子匹配检测 =====
+  const [factorDetection, setFactorDetection] = useState({
+    detected: false,
+    matched: [],      // 已匹配的因子
+    unmatched: [],    // 未匹配的因子（模型无此指标）
+    rawFactors: []    // 从输入中提取的原始因子名称
+  });
+
   // 读取 localStorage 中的知识库选中状态
   const loadSelectedKnowledge = useCallback(() => {
     const savedIds = JSON.parse(localStorage.getItem('vdt_knowledge_selected_ids') || '[]');
@@ -165,6 +175,101 @@ const AITuningPanel = ({ onClose, onBringToFront, selectedScenarios = [] }) => {
       setRestoredScenarios([]);
     }
   }, []);
+
+  // ===== 因子匹配检测函数 =====
+  const detectFactorsInInput = useCallback((inputText) => {
+    if (!inputText || inputText.trim().length === 0) {
+      setFactorDetection({ detected: false, matched: [], unmatched: [], rawFactors: [] });
+      return;
+    }
+
+    // 获取模型中所有因子名称（用于匹配）
+    const allModelFactors = Object.values(nodes).map(n => n.name);
+
+    // 从输入中提取可能的因子名称
+    const rawFactors = [];
+
+    // 方法 1：直接匹配模型中的因子名称
+    allModelFactors.forEach(factorName => {
+      if (inputText.includes(factorName)) {
+        rawFactors.push(factorName);
+      }
+    });
+
+    // 方法 2：从模型因子中提取共同后缀，用于识别未匹配的因子
+    // 例如：模型中有"管理费用"、"销售费用"，则"费用"是后缀
+    const factorSuffixes = new Set();
+    allModelFactors.forEach(factor => {
+      // 提取 2-3 字的后缀（如"费用"、"成本"、"利率"）
+      if (factor.length >= 3) {
+        factorSuffixes.add(factor.slice(-2));  // 后 2 字
+        factorSuffixes.add(factor.slice(-3));  // 后 3 字
+      }
+    });
+
+    // 方法 2.5：添加常见的财务/业务因子后缀作为兜底（不硬编码具体因子名称）
+    const commonSuffixes = ['费用', '成本', '收入', '利润', '利率', '利润率', '毛利率', '净利率', '效能', '产能', '良率', '效率', '人数', '金额', '占比', '率', '额'];
+    commonSuffixes.forEach(suffix => factorSuffixes.add(suffix));
+
+    // 方法 3：直接从输入中查找包含后缀的词组
+    // 例如：输入"毛利率增加"，后缀有"率"、"毛利率"，则提取"毛利率"
+    const foundWords = new Set();
+
+    // 遍历所有后缀，在输入中查找以该后缀结尾的词
+    factorSuffixes.forEach(suffix => {
+      // 正则：匹配后缀前面 0-2 个中文字符
+      const regex = new RegExp(`[\\u4e00-\\u9fa5]{0,2}${suffix}`, 'g');
+      const matches = inputText.match(regex) || [];
+      matches.forEach(match => {
+        // 只保留 2-4 字的词
+        if (match.length >= 2 && match.length <= 4) {
+          foundWords.add(match);
+        }
+      });
+    });
+
+    console.log('[因子检测] 通过后缀找到的词:', Array.from(foundWords));
+
+    // 将找到的词与模型因子比对
+    foundWords.forEach(word => {
+      if (allModelFactors.includes(word)) {
+        if (!rawFactors.includes(word)) {
+          rawFactors.push(word);
+        }
+      } else {
+        // 检查是否已存在类似的未匹配因子（避免重复）
+        const exists = rawFactors.some(f => !allModelFactors.includes(f) && f === word);
+        if (!exists) {
+          rawFactors.push(word);
+        }
+      }
+    });
+
+    // 分类：已匹配 vs 未匹配
+    const matched = rawFactors.filter(f => allModelFactors.includes(f));
+    const unmatched = rawFactors.filter(f => !allModelFactors.includes(f));
+
+    console.log('[因子检测] 输入文本:', inputText.substring(0, 50) + '...');
+    console.log('[因子检测] 提取到的因子:', rawFactors);
+    console.log('[因子检测] 已匹配:', matched);
+    console.log('[因子检测] 未匹配:', unmatched);
+
+    setFactorDetection({
+      detected: true,
+      matched: matched.map(name => ({ name, node: allModelFactors.find(n => n === name) })),
+      unmatched: unmatched.map(name => ({ name })),
+      rawFactors
+    });
+  }, [nodes]);
+
+  // 防抖处理：输入停止 500ms 后才检测
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      detectFactorsInInput(businessContext);
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [businessContext, detectFactorsInInput]);
 
   useEffect(() => {
     loadSelectedKnowledge();
@@ -1138,9 +1243,15 @@ const AITuningPanel = ({ onClose, onBringToFront, selectedScenarios = [] }) => {
             };
           }
 
-          // 都找不到，返回原数据（但记录警告）
+          // 都找不到，标记为"模型无此指标"
           console.warn('[AI 调参] 无法匹配模型数据，使用 AI 生成的指标:', metric.name);
-          return metric;
+          return {
+            ...metric,
+            notInModel: true,  // 标记该指标不在模型中
+            before: null,
+            after: null,
+            target: null
+          };
         });
         console.log('[AI 调参] 修正后的 keyMetrics:', finalData.expectedImpact.keyMetrics);
       }
@@ -1422,6 +1533,8 @@ ${businessContext}
     recommendations.forEach((rec) => {
       console.log('AI调参: 处理调整项', rec.nodeId, rec.nodeName, '推荐值:', rec.recommendedValue);
 
+      console.log('AI 调参：rec 完整数据', rec);
+      console.log('AI 调参：businessReason=', rec.businessReason, 'dataBasis=', rec.dataBasis, 'riskWarning=', rec.riskWarning);
       if (rec.recommendedValue !== undefined) {
         const numericValue = parseFloat(rec.recommendedValue);
         const currentValue = parseFloat(rec.currentValue) || 1;
@@ -1584,6 +1697,44 @@ ${businessContext}
               updates.initialBaseline = numericValue;
             }
           }
+
+          // 生成 AI 决策描述（整合所有详细信息）
+          // 注意：手工添加的因子不自动生成描述，由用户自行编辑
+          if (!rec.isManualAdd) {
+            const aiReasonParts = [];
+
+            // 添加 AI 决策前缀
+            aiReasonParts.push(`🤖 AI 决策：`);
+
+            // 1. 业务理由
+            if (rec.businessReason) {
+              aiReasonParts.push(`【业务理由】${rec.businessReason}`);
+            }
+
+            // 2. 数据依据
+            if (rec.dataBasis) {
+              aiReasonParts.push(`【数据依据】${rec.dataBasis}`);
+            }
+
+            // 3. 风险提示（兼容 risks 和 riskWarning 字段）
+            const riskText = rec.risks || rec.riskWarning;
+            if (riskText) {
+              aiReasonParts.push(`【风险提示】${riskText}`);
+            }
+
+            // 4. 因子联动
+            if (rec.factorLinkage) {
+              aiReasonParts.push(`【因子联动】${rec.factorLinkage}`);
+            }
+
+            // 5. 如果以上都没有，使用通用描述
+            if (aiReasonParts.length === 1) { // 只有 AI 决策前缀
+              aiReasonParts.push(`基于业务目标和敏感性分析，建议调整${node.name}从${formatValue(currentValue, node.format, node.unit)}到${formatValue(numericValue, node.format, node.unit)}`);
+            }
+
+            updates.adjustmentDescription = aiReasonParts.join('\n\n');
+          }
+          // 如果是手工添加的因子，不设置 adjustmentDescription
 
           updateNode(matchedNodeId, updates);
           appliedCount++;
@@ -2285,6 +2436,42 @@ ${businessContext}
             className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 text-sm resize-none"
           />
 
+          {/* 因子匹配检测结果 */}
+          {factorDetection.detected && (factorDetection.matched.length > 0 || factorDetection.unmatched.length > 0) && (
+            <div className="mt-2 p-3 rounded-lg border text-sm">
+              {factorDetection.matched.length > 0 && (
+                <div className="flex items-center gap-2 mb-1">
+                  <svg className="w-4 h-4 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  <span className="text-green-800 font-medium">已匹配模型因子 ({factorDetection.matched.length})：</span>
+                </div>
+              )}
+              {factorDetection.matched.length > 0 && (
+                <div className="pl-6 flex flex-wrap gap-1 mb-2">
+                  {factorDetection.matched.map((f, i) => (
+                    <span key={i} className="px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs">{f.name}</span>
+                  ))}
+                </div>
+              )}
+
+              {factorDetection.unmatched.length > 0 && (
+                <div className="flex items-center gap-2 mb-1">
+                  <svg className="w-4 h-4 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                  <span className="text-amber-800 font-medium">模型无此指标 ({factorDetection.unmatched.length})：</span>
+                </div>
+              )}
+              {factorDetection.unmatched.length > 0 && (
+                <div className="pl-6 flex flex-wrap gap-1">
+                  {factorDetection.unmatched.map((f, i) => (
+                    <span key={i} className="px-2 py-0.5 bg-amber-100 text-amber-700 rounded text-xs">⚠️ {f.name}</span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* 文档上传 */}
           <div className="mt-3">
@@ -2429,6 +2616,12 @@ ${businessContext}
               <ConstraintRulePanel onClose={() => setShowRulePanel(false)} />
             </div>
           )}
+          {/* 别名管理面板 - 展开/收起 */}
+          {showAliasPanel && (
+            <div className="mb-3 mx-2">
+              <FactorAliasPanel onClose={() => setShowAliasPanel(false)} />
+            </div>
+          )}
 
           <div className="flex items-center gap-4">
             {/* 已选场景 */}
@@ -2509,6 +2702,12 @@ ${businessContext}
                 className="px-3 py-1.5 text-xs bg-gray-500 text-white rounded hover:bg-gray-600 transition-colors"
               >
                 规则管理
+              </button>
+              <button
+                onClick={() => setShowAliasPanel(!showAliasPanel)}
+                className="px-3 py-1.5 text-xs bg-purple-500 text-white rounded hover:bg-purple-600 transition-colors"
+              >
+                别名管理
               </button>
             </div>
           </div>
@@ -2716,6 +2915,21 @@ ${businessContext}
                     {aiResult.expectedImpact.keyMetrics?.length > 0 && (
                       <div className="grid grid-cols-1 gap-3">
                         {aiResult.expectedImpact.keyMetrics.map((metric, i) => {
+                          // 检查是否是不在模型中的指标
+                          if (metric.notInModel) {
+                            return (
+                              <div key={i} className="p-3 bg-gradient-to-r from-gray-50 to-slate-50 rounded-lg border border-gray-200">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-sm font-medium text-gray-800">{metric.name}</span>
+                                  <span className="text-xs text-gray-500">概率：{metric.probability || 'N/A'}</span>
+                                </div>
+                                <div className="flex items-center gap-3 mt-2">
+                                  <span className="text-sm text-gray-400">⚠️ 模型无此指标</span>
+                                </div>
+                              </div>
+                            );
+                          }
+
                           // 动态计算百分比变化
                           const changePercent = metric.before && metric.after
                             ? ((metric.after - metric.before) / Math.abs(metric.before)) * 100

@@ -285,7 +285,7 @@ function CumulativeBarChart({
     return cumulativeMap;
   };
 
-  // 计算目标累计值 - 实际期用实际值，预测期用目标值
+  // 计算目标累计值 - 所有月份都使用目标值计算累计
   const calculateTargetCumulative = () => {
     const cumulativeMap = new Map();
 
@@ -300,24 +300,24 @@ function CumulativeBarChart({
 
         for (let i = 0; i <= index; i++) {
           const checkMonth = months[i];
-          const checkIsActual = i <= actualForecastSplitIndex;
 
           let monthNumerator = 0;
           let monthDenominator = 0;
 
+          // 目标累计：所有月份都使用"目标"key
           numeratorIds.forEach(depId => {
             const depNode = allNodes[depId];
             if (depNode) {
               let monthKey;
               if (checkMonth.includes('月')) {
                 const monthNum = parseInt(checkMonth, 10);
-                monthKey = checkIsActual ? `${monthNum}月实际` : `${monthNum}月目标`;
+                monthKey = `${monthNum}月目标`;
               } else {
-                monthKey = checkIsActual ? `${checkMonth}-实际` : `${checkMonth}-目标`;
+                monthKey = `${checkMonth}-目标`;
               }
 
-              // 目标累计：使用 originalTimeData（未调整的目标值）
-              const timeValue = depNode.originalTimeData?.[monthKey] ?? depNode.timeData?.[monthKey];
+              // 目标累计：优先从当前 timeData 读取目标值
+              const timeValue = depNode.timeData?.[monthKey] ?? depNode.originalTimeData?.[monthKey];
               if (timeValue !== undefined && !isNaN(parseFloat(timeValue))) {
                 monthNumerator += parseFloat(timeValue);
               }
@@ -330,13 +330,13 @@ function CumulativeBarChart({
               let monthKey;
               if (checkMonth.includes('月')) {
                 const monthNum = parseInt(checkMonth, 10);
-                monthKey = checkIsActual ? `${monthNum}月实际` : `${monthNum}月目标`;
+                monthKey = `${monthNum}月目标`;
               } else {
-                monthKey = checkIsActual ? `${checkMonth}-实际` : `${checkMonth}-目标`;
+                monthKey = `${checkMonth}-目标`;
               }
 
-              // 目标累计：使用 originalTimeData（未调整的目标值）
-              const timeValue = depNode.originalTimeData?.[monthKey] ?? depNode.timeData?.[monthKey];
+              // 目标累计：优先从当前 timeData 读取目标值
+              const timeValue = depNode.timeData?.[monthKey] ?? depNode.originalTimeData?.[monthKey];
               if (timeValue !== undefined && !isNaN(parseFloat(timeValue))) {
                 monthDenominator += parseFloat(timeValue);
               }
@@ -356,47 +356,28 @@ function CumulativeBarChart({
           cumulativeMap.set(month, 0);
         }
       } else if (isAverageIndicator) {
-        // 平均型指标：使用移动平均
+        // 平均型指标：使用移动平均 - 所有月份都用目标值
         let sum = 0;
         let count = 0;
 
         for (let i = 0; i <= index; i++) {
           const checkMonth = months[i];
-          const checkIsActual = i <= actualForecastSplitIndex;
-
-          if (checkIsActual) {
-            const actualData = originalActualData.find(d => d.month === checkMonth);
-            if (actualData && !isNaN(actualData.value)) {
-              sum += actualData.value;
-              count++;
-            }
-          } else {
-            const targetDataPoint = targetData.find(d => d.month === checkMonth);
-            if (targetDataPoint && !isNaN(targetDataPoint.value)) {
-              sum += targetDataPoint.value;
-              count++;
-            }
+          const targetDataPoint = targetData.find(d => d.month === checkMonth);
+          if (targetDataPoint && !isNaN(targetDataPoint.value)) {
+            sum += targetDataPoint.value;
+            count++;
           }
         }
 
         cumulativeMap.set(month, count > 0 ? sum / count : 0);
       } else {
-        // 普通指标：简单累加
+        // 普通指标：简单累加 - 所有月份都用目标值
         let sum = 0;
         for (let i = 0; i <= index; i++) {
           const checkMonth = months[i];
-          const checkIsActual = i <= actualForecastSplitIndex;
-
-          if (checkIsActual) {
-            const actualData = originalActualData.find(d => d.month === checkMonth);
-            if (actualData && !isNaN(actualData.value)) {
-              sum += actualData.value;
-            }
-          } else {
-            const targetDataPoint = targetData.find(d => d.month === checkMonth);
-            if (targetDataPoint && !isNaN(targetDataPoint.value)) {
-              sum += targetDataPoint.value;
-            }
+          const targetDataPoint = targetData.find(d => d.month === checkMonth);
+          if (targetDataPoint && !isNaN(targetDataPoint.value)) {
+            sum += targetDataPoint.value;
           }
         }
         cumulativeMap.set(month, sum);
@@ -1494,13 +1475,15 @@ const TrendChart = ({ node, allNodes = {}, scenarioName = '当前方案', onClos
           }
         }
 
-        // --- 目标数据 - 从 initialData 读取（永远不变）---
+        // --- 目标数据 - 优先从当前 timeData 读取目标值（因为目标值存储在当前数据的"X 月目标"字段）---
         let targetValue = null;
-        if (initialData && initialData[targetKey] !== undefined) {
-          targetValue = parseFloat(initialData[targetKey]);
-        } else if (currentData && currentData[targetKey] !== undefined) {
-          // 如果 initialData 没有，从当前读取（仅作为后备）
+        // 首先尝试从当前 timeData 读取（目标值通常在 timeData 中）
+        if (currentData && currentData[targetKey] !== undefined) {
           targetValue = parseFloat(currentData[targetKey]);
+        }
+        // 如果当前数据没有，再从 initialData 读取
+        if (targetValue === null && initialData && initialData[targetKey] !== undefined) {
+          targetValue = parseFloat(initialData[targetKey]);
         }
         if (targetValue !== null && !isNaN(targetValue)) {
           targetData.push({ month, value: targetValue });

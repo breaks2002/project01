@@ -112,6 +112,47 @@ const loadConstraintPatterns = () => {
 };
 
 /**
+ * 从 localStorage 加载用户配置的因子别名，如果不存在则使用默认别名
+ */
+const loadAliases = () => {
+  try {
+    const savedAliases = localStorage.getItem('vdt_factor_aliases');
+    if (savedAliases) {
+      const aliases = JSON.parse(savedAliases);
+      console.log('[别名引擎] 从 localStorage 加载了', aliases.length, '个用户别名');
+
+      // 将用户别名转换为 FACTOR_ALIASES 格式
+      const factorAliases = {};
+      aliases.forEach(alias => {
+        if (alias.enabled) {
+          factorAliases[alias.canonicalName] = alias.aliases || [];
+        }
+      });
+
+      // 如果没有用户别名，使用默认别名
+      if (Object.keys(factorAliases).length === 0) {
+        console.log('[别名引擎] 没有用户别名，使用默认别名');
+        return FACTOR_ALIASES;
+      }
+
+      // 合并用户别名和默认别名（用户别名优先）
+      // 这样可以确保即使用户只配置了部分别名，其他默认别名仍然可用
+      const mergedAliases = { ...FACTOR_ALIASES };
+      Object.keys(factorAliases).forEach(key => {
+        mergedAliases[key] = factorAliases[key];
+      });
+      console.log('[别名引擎] 使用合并后的别名（用户配置 + 默认）');
+      return mergedAliases;
+    }
+  } catch (err) {
+    console.error('[别名引擎] 加载用户别名失败:', err);
+  }
+
+  console.log('[别名引擎] 使用默认别名');
+  return FACTOR_ALIASES;
+};
+
+/**
  * 根据 actionType 获取 pattern 配置
  */
 const getPatternConfigForActionType = (actionType) => {
@@ -260,7 +301,7 @@ const containsActionKeywords = (context, actionKeywords, triggerWords) => {
 /**
  * 规则引擎解析
  */
-const parseWithRules = (context, driverNodes, customPatterns = null) => {
+const parseWithRules = (context, driverNodes, customPatterns = null, customAliases = null) => {
   const ruleConstraints = [];
 
   console.log('[规则引擎] 开始解析，因子数量:', driverNodes.length);
@@ -274,6 +315,10 @@ const parseWithRules = (context, driverNodes, customPatterns = null) => {
   // 使用自定义规则或加载用户规则
   const patterns = customPatterns || loadConstraintPatterns();
 
+  // 使用自定义别名或加载用户别名
+  const factorAliases = customAliases || loadAliases();
+  console.log('[规则引擎] 因子别名表:', factorAliases);
+
   // 用于去重的 Set（基于 factorId + type + value 的组合）
   const seenConstraints = new Set();
 
@@ -282,8 +327,8 @@ const parseWithRules = (context, driverNodes, customPatterns = null) => {
     // 遍历所有因子（包括别名）
     allNodes.forEach(node => {
       const canonicalName = node.name;
-      // 获取因子的所有匹配名称（标准名 + 别名）
-      const allNames = [canonicalName, ...(FACTOR_ALIASES[canonicalName] || [])];
+      // 获取因子的所有匹配名称（标准名 + 用户配置的别名）
+      const allNames = [canonicalName, ...(factorAliases[canonicalName] || [])];
 
       // 【关键修复】检查用户输入是否包含此因子的任何名称（标准名或别名）
       // 使用更精确的匹配：因子名称必须是完整的词，不能是其他词的一部分
@@ -321,6 +366,10 @@ const parseWithRules = (context, driverNodes, customPatterns = null) => {
           return; // 跳过此规则的匹配
         }
 
+        // 【关键修复】逗号边界限制 - 将 context 按逗号/句号分割，逐句匹配
+        // 防止跨句匹配：例如"毛利率增加 5 个百分点，管理费用控制在 100 万"不会让毛利率匹配到"控制在 100 万"
+        const contextSegments = context.split(/[,，;]/).map(s => s.trim()).filter(s => s.length > 0);
+
         // 检查 pattern 是否包含 {unit} 占位符
         const hasUnitPlaceholder = patternConfig.patterns.some(p => p.includes('{unit}'));
 
@@ -340,7 +389,16 @@ const parseWithRules = (context, driverNodes, customPatterns = null) => {
 
             const regex = new RegExp(pattern, 'i');
             console.log(`[规则引擎] 尝试匹配（无单位）：因子=${factorName}, 规则=${patternName}, pattern=${pattern}`);
-            const match = context.match(regex);
+
+            // 【关键修复】在每个分段中匹配，防止跨句匹配
+            let match = null;
+            for (const segment of contextSegments) {
+              const segmentMatch = segment.match(regex);
+              if (segmentMatch && segmentMatch[1]) {
+                match = segmentMatch;
+                break; // 找到第一个匹配就停止
+              }
+            }
 
             if (match && match[1]) {
               const value = parseFloat(match[1]);
@@ -399,7 +457,16 @@ const parseWithRules = (context, driverNodes, customPatterns = null) => {
 
                 const regex = new RegExp(pattern, 'i');
                 console.log(`[规则引擎] 尝试匹配（有单位）：因子=${factorName}, 规则=${patternName}, 单位=${unitKeyword}, pattern=${pattern}`);
-                const match = context.match(regex);
+
+                // 【关键修复】在每个分段中匹配，防止跨句匹配
+                let match = null;
+                for (const segment of contextSegments) {
+                  const segmentMatch = segment.match(regex);
+                  if (segmentMatch && segmentMatch[1]) {
+                    match = segmentMatch;
+                    break; // 找到第一个匹配就停止
+                  }
+                }
 
                 if (match && match[1]) {
                   const value = parseFloat(match[1]);
@@ -520,7 +587,7 @@ const parseWithAI = async (context, allNodes, aiConfig, callAIFunction) => {
       // 在所有节点中查找（包括计算指标）
       const node = allNodes.find(n =>
         n.name === aiC.factorName ||
-        (FACTOR_ALIASES[n.name] || []).includes(aiC.factorName)
+        (factorAliases[n.name] || []).includes(aiC.factorName)
       );
 
       if (!node) {

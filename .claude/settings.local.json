@@ -29,7 +29,25 @@
       "Bash(rm src/components/DataPanel/AITuningPanel.jsx.tmp)",
       "Bash(netstat -ano)",
       "Bash(findstr :5173)",
-      "Bash(node -e \"console.log\\(''请用户在浏览器控制台执行：console.log\\(JSON.parse\\(localStorage.getItem\\(\"\"vdt_constraint_rules\"\"\\)\\)\\)''\\)\")"
+      "Bash(node -e \"console.log\\(''请用户在浏览器控制台执行：console.log\\(JSON.parse\\(localStorage.getItem\\(\"\"vdt_constraint_rules\"\"\\)\\)\\)''\\)\")",
+      "Bash(sed -i \"s/{factor}\\\\.\\\\*\\\\?{actionKeywords}/{factor}[^,.。]*?{actionKeywords}/g\" src/utils/constraintPatterns.js)",
+      "Bash(sed -i \"s/{actionKeywords}\\\\.\\\\*\\\\?{factor}/{actionKeywords}[^,.。]*?{factor}/g\" src/utils/constraintPatterns.js)",
+      "Bash(sed -i \"s/{factor}\\\\.\\\\*\\\\?至少/{factor}[^,.。]*? 至少/g\" src/utils/constraintPatterns.js)",
+      "Bash(sed -i \"s/{factor}\\\\.\\\\*\\\\?不低于/{factor}[^,.。]*? 不低于/g\" src/utils/constraintPatterns.js)",
+      "Bash(sed -i \"s/{factor}\\\\.\\\\*\\\\?控制在/{factor}[^,.。]*? 控制在/g\" src/utils/constraintPatterns.js)",
+      "Bash(sed -i \"s/{factor}\\\\.\\\\*\\\\?\\\\[尽量尽\\\\]/{factor}[^,.。]*?[尽量尽]/g\" src/utils/constraintPatterns.js)",
+      "Bash(sed -i \"203s/.*/      ''{factor}[^,，。]*?{keywords}[^,，。]*?\\(\\\\\\\\d+\\(?:\\\\\\\\.\\\\\\\\d+\\)?\\)\\\\\\\\s*{unit}'',/\" src/utils/constraintPatterns.js)",
+      "Bash(sed -i \"204s/.*/      ''{keywords}[^,，。]*?{factor}[^,，。]*?\\(\\\\\\\\d+\\(?:\\\\\\\\.\\\\\\\\d+\\)?\\)\\\\\\\\s*{unit}'',/\" src/utils/constraintPatterns.js)",
+      "Bash(sed -i \"221s/.*/      ''{factor}[^,，。]*?{actionKeywords}[^,，。]*?{trigger}[^,，。]*?\\(\\\\\\\\d+\\(?:\\\\\\\\.\\\\\\\\d+\\)?\\)\\\\\\\\s*{unit}'',/\" src/utils/constraintPatterns.js)",
+      "Bash(sed -i \"222s/.*/      ''{actionKeywords}[^,，。]*?{factor}[^,，。]*?{trigger}[^,，。]*?\\(\\\\\\\\d+\\(?:\\\\\\\\.\\\\\\\\d+\\)?\\)\\\\\\\\s*{unit}'',/\" src/utils/constraintPatterns.js)",
+      "Bash(sed -i \"239s/.*/      ''{factor}[^,，。]*?{actionKeywords}[^,，。]*?{trigger}[^,，。]*?\\(\\\\\\\\d+\\(?:\\\\\\\\.\\\\\\\\d+\\)?\\)\\\\\\\\s*{unit}'',/\" src/utils/constraintPatterns.js)",
+      "Bash(sed -i \"240s/.*/      ''{actionKeywords}[^,，。]*?{factor}[^,，。]*?{trigger}[^,，。]*?\\(\\\\\\\\d+\\(?:\\\\\\\\.\\\\\\\\d+\\)?\\)\\\\\\\\s*{unit}'',/\" src/utils/constraintPatterns.js)",
+      "Bash(sed -i \"241s/.*/      ''{factor}[^,，。]*?至少 [^,，。]*?\\(\\\\\\\\d+\\(?:\\\\\\\\.\\\\\\\\d+\\)?\\)\\\\\\\\s*{unit}'',/\" src/utils/constraintPatterns.js)",
+      "Bash(sed -i \"242s/.*/      ''{factor}[^,，。]*?不低于 [^,，。]*?\\(\\\\\\\\d+\\(?:\\\\\\\\.\\\\\\\\d+\\)?\\)\\\\\\\\s*{unit}''/\" src/utils/constraintPatterns.js)",
+      "Bash(dos2unix src/utils/constraintPatterns.js)",
+      "Bash(sed -i 's/\\\\r$//' src/utils/constraintPatterns.js)",
+      "Bash(sed -i \"241s/\\\\.\\\\*\\\\?/[^,.。]*?/g\" src/utils/constraintPatterns.js)",
+      "Bash(sed -i \"242s/\\\\.\\\\*\\\\?/[^,.。]*?/g\" src/utils/constraintPatterns.js)"
     ]
   }
 }

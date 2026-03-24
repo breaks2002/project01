@@ -13,6 +13,10 @@ const ConstraintRulePanel = ({ onClose, position: initialPosition = { x: 200, y:
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingUnit, setEditingUnit] = useState(null);
   const [showAddUnitModal, setShowAddUnitModal] = useState(false);
+  const [addRulePosition, setAddRulePosition] = useState({ x: 100, y: 150 });
+  const [addUnitPosition, setAddUnitPosition] = useState({ x: 100, y: 150 });
+  const [editorPosition, setEditorPosition] = useState({ x: 100, y: 150 });
+  const [searchQuery, setSearchQuery] = useState(''); // 搜索关键词
   const [position, setPosition] = useState(initialPosition);
   const [isDragging, setIsDragging] = useState(false);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
@@ -131,7 +135,27 @@ const ConstraintRulePanel = ({ onClose, position: initialPosition = { x: 200, y:
   const saveUnit = (updatedUnit) => { setUnits(prev => prev.map(unit => unit.id === updatedUnit.id ? updatedUnit : unit)); setEditingUnit(null); };
   const addUnit = (newUnit) => { newUnit.id = `unit_${Date.now()}`; newUnit.enabled = true; setUnits(prev => [...prev, newUnit]); setShowAddUnitModal(false); };
 
-  const groupedRules = rules.reduce((acc, rule) => { if (!acc[rule.category]) acc[rule.category] = []; acc[rule.category].push(rule); return acc; }, {});
+  // 搜索过滤
+  const matchesSearch = (text) => {
+    if (!searchQuery.trim()) return true;
+    return text.toLowerCase().includes(searchQuery.toLowerCase());
+  };
+
+  const groupedRules = rules.reduce((acc, rule) => {
+    // 搜索过滤：检查规则名称、关键词、触发词
+    const searchText = [rule.name, ...(rule.keywords || []), ...(rule.triggerWords || [])].join(' ');
+    if (searchQuery && !matchesSearch(searchText)) return acc;
+    if (!acc[rule.category]) acc[rule.category] = [];
+    acc[rule.category].push(rule);
+    return acc;
+  }, {});
+
+  const filteredUnits = units.filter(unit => {
+    if (!searchQuery.trim()) return unit;
+    const searchText = [unit.name, ...(unit.keywords || [])].join(' ');
+    return matchesSearch(searchText);
+  });
+
   const categoryNames = { allow: '允许类', control: '控制类', change: '变化类', must: '必须类' };
 
   return (
@@ -193,6 +217,34 @@ const ConstraintRulePanel = ({ onClose, position: initialPosition = { x: 200, y:
         </button>
       </div>
 
+      {/* 搜索框 - 只在规则和单位标签页显示 */}
+      {(activeTab === 'rules' || activeTab === 'units') && (
+        <div className="px-3 py-2 border-b bg-gray-50">
+          <div className="relative">
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder={activeTab === 'rules' ? '搜索规则名称、关键词...' : '搜索单位名称、关键词...'}
+              className="w-full pl-8 pr-8 py-1.5 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            />
+            <svg className="w-4 h-4 text-gray-400 absolute left-2.5 top-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery('')}
+                className="absolute right-2 top-2 text-gray-400 hover:text-gray-600"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* 内容区 - 可滚动 */}
       <div className="p-3 overflow-y-auto flex-1" style={{ maxHeight: 'calc(100vh - 200px)' }}>
         {activeTab === 'rules' && (
@@ -250,7 +302,7 @@ const ConstraintRulePanel = ({ onClose, position: initialPosition = { x: 200, y:
             </div>
 
             <div className="space-y-2">
-              {units.map(unit => (
+              {filteredUnits.map(unit => (
                 <div key={unit.id} className={`p-2 border rounded text-xs ${unit.enabled !== false ? 'bg-white border-gray-200' : 'bg-gray-100 border-gray-200 opacity-70'}`}>
                   <div className="flex items-center justify-between mb-1">
                     <div className="flex items-center gap-2">
@@ -283,18 +335,59 @@ const ConstraintRulePanel = ({ onClose, position: initialPosition = { x: 200, y:
           </>
         )}
       </div>
-      {editingRule && <RuleEditor rule={editingRule} onSave={saveRule} onClose={() => setEditingRule(null)} />}
-      {showAddModal && <RuleEditor rule={null} onSave={addRule} onClose={() => setShowAddModal(false)} />}
-      {editingUnit && <UnitEditor unit={editingUnit} onSave={saveUnit} onClose={() => setEditingUnit(null)} />}
-      {showAddUnitModal && <UnitEditor unit={null} onSave={addUnit} onClose={() => setShowAddUnitModal(false)} />}
+      {editingRule && <RuleEditor rule={editingRule} onSave={saveRule} onClose={() => setEditingRule(null)} position={editorPosition} />}
+      {showAddModal && <RuleEditor rule={null} onSave={addRule} onClose={() => setShowAddModal(false)} position={addRulePosition} />}
+      {editingUnit && <UnitEditor unit={editingUnit} onSave={saveUnit} onClose={() => setEditingUnit(null)} position={editorPosition} />}
+      {showAddUnitModal && <UnitEditor unit={null} onSave={addUnit} onClose={() => setShowAddUnitModal(false)} position={addUnitPosition} />}
     </div>
   );
 };
 
-const RuleEditor = ({ rule, onSave, onClose }) => {
+const RuleEditor = ({ rule, onSave, onClose, position: initialPosition = { x: 100, y: 150 } }) => {
   const [formData, setFormData] = useState({ name: rule?.name || '', category: rule?.category || 'allow', actionType: rule?.actionType || 'max_override', keywords: rule?.keywords || [], triggerWords: rule?.triggerWords || [], enabled: rule?.enabled ?? true });
   const [keywordInput, setKeywordInput] = useState('');
   const [triggerInput, setTriggerInput] = useState('');
+  const [position, setPosition] = useState(initialPosition);
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+  const containerRef = useRef(null);
+  const headerRef = useRef(null);
+
+  // 处理拖动开始
+  const handleDragStart = (e) => {
+    if (headerRef.current && headerRef.current.contains(e.target)) {
+      setIsDragging(true);
+      const rect = containerRef.current.getBoundingClientRect();
+      setDragOffset({
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top
+      });
+    }
+  };
+
+  // 处理拖动移动
+  const handleDragMove = (e) => {
+    if (!isDragging) return;
+    const newX = Math.max(0, Math.min(e.clientX - dragOffset.x, window.innerWidth - 500));
+    const newY = Math.max(80, Math.min(e.clientY - dragOffset.y, window.innerHeight - 400));
+    setPosition({ x: newX, y: newY });
+  };
+
+  // 处理拖动结束
+  const handleDragEnd = () => {
+    setIsDragging(false);
+  };
+
+  useEffect(() => {
+    if (isDragging) {
+      document.addEventListener('mousemove', handleDragMove);
+      document.addEventListener('mouseup', handleDragEnd);
+      return () => {
+        document.removeEventListener('mousemove', handleDragMove);
+        document.removeEventListener('mouseup', handleDragEnd);
+      };
+    }
+  }, [isDragging, dragOffset]);
 
   const handleSubmit = (e) => { e.preventDefault(); onSave(rule ? { ...rule, ...formData } : formData); };
   const addKeyword = () => { if (keywordInput.trim()) { setFormData(prev => ({ ...prev, keywords: [...prev.keywords, keywordInput.trim()] })); setKeywordInput(''); } };
@@ -303,37 +396,51 @@ const RuleEditor = ({ rule, onSave, onClose }) => {
   const removeTrigger = (i) => { setFormData(prev => ({ ...prev, triggerWords: prev.triggerWords.filter((_, idx) => idx !== i) })); };
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[100]">
-      <div className="bg-white rounded-lg shadow-xl w-full max-w-lg mx-4">
-        <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
+    <div
+      ref={containerRef}
+      onMouseDown={handleDragStart}
+      className="fixed bg-white rounded-lg shadow-2xl border z-[150] w-[500px] cursor-move"
+      style={{ left: `${position.x}px`, top: `${position.y}px`, cursor: isDragging ? 'grabbing' : 'default' }}
+    >
+      {/* 头部 - 拖动区域 */}
+      <div
+        ref={headerRef}
+        className="px-4 py-3 border-b border-gray-200 flex items-center justify-between bg-gradient-to-r from-indigo-50 to-purple-50 shrink-0 cursor-grab active:cursor-grabbing rounded-t-lg"
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-lg">{rule ? '✏️' : '➕'}</span>
           <h3 className="text-base font-semibold text-gray-900">{rule ? '编辑规则' : '添加规则'}</h3>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg></button>
         </div>
-        <form onSubmit={handleSubmit} className="p-4 space-y-3 max-h-[70vh] overflow-y-auto">
-          <div><label className="block text-sm font-medium text-gray-700 mb-1">规则名称</label><input type="text" value={formData.name} onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))} className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm" required /></div>
-          <div className="grid grid-cols-2 gap-3">
-            <div><label className="block text-sm font-medium text-gray-700 mb-1">分类</label><select value={formData.category} onChange={(e) => setFormData(prev => ({ ...prev, category: e.target.value }))} className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm"><option value="allow">允许类</option><option value="control">控制类</option><option value="change">变化类</option><option value="must">必须类</option></select></div>
-            <div><label className="block text-sm font-medium text-gray-700 mb-1">动作类型</label><select value={formData.actionType} onChange={(e) => setFormData(prev => ({ ...prev, actionType: e.target.value }))} className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm"><option value="max_override">允许超出</option><option value="max_limit">控制限制</option><option value="increase">增加</option><option value="decrease">降低</option><option value="must_reduce">必须降低</option><option value="must_reach">必须达到</option></select></div>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">关键词</label>
-            <div className="flex gap-2 mb-2"><input type="text" value={keywordInput} onChange={(e) => setKeywordInput(e.target.value)} onKeyPress={(e) => e.key === 'Enter' && (e.preventDefault(), addKeyword())} placeholder="输入后按回车添加" className="flex-1 px-2 py-1.5 border border-gray-300 rounded text-sm" /><button type="button" onClick={addKeyword} className="px-3 py-1.5 bg-indigo-600 text-white rounded text-sm">添加</button></div>
-            <div className="flex flex-wrap gap-1">{formData.keywords.map((kw, i) => (<span key={i} className="inline-flex items-center gap-1 px-2 py-1 bg-indigo-100 text-indigo-700 text-xs rounded">{kw}<button type="button" onClick={() => removeKeyword(i)} className="hover:text-indigo-900">×</button></span>))}</div>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">触发词</label>
-            <div className="flex gap-2 mb-2"><input type="text" value={triggerInput} onChange={(e) => setTriggerInput(e.target.value)} onKeyPress={(e) => e.key === 'Enter' && (e.preventDefault(), addTrigger())} placeholder="输入后按回车添加" className="flex-1 px-2 py-1.5 border border-gray-300 rounded text-sm" /><button type="button" onClick={addTrigger} className="px-3 py-1.5 bg-indigo-600 text-white rounded text-sm">添加</button></div>
-            <div className="flex flex-wrap gap-1">{formData.triggerWords.map((tw, i) => (<span key={i} className="inline-flex items-center gap-1 px-2 py-1 bg-purple-100 text-purple-700 text-xs rounded">{tw}<button type="button" onClick={() => removeTrigger(i)} className="hover:text-purple-900">×</button></span>))}</div>
-          </div>
-          <div className="flex items-center gap-2"><input type="checkbox" id="enabled" checked={formData.enabled} onChange={(e) => setFormData(prev => ({ ...prev, enabled: e.target.checked }))} className="w-4 h-4 text-indigo-600 rounded" /><label htmlFor="enabled" className="text-sm text-gray-700">启用此规则</label></div>
-          <div className="flex justify-end gap-3 pt-3 border-t"><button type="button" onClick={onClose} className="px-4 py-2 text-gray-700 bg-gray-100 rounded hover:bg-gray-200">取消</button><button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700">保存</button></div>
-        </form>
+        <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
       </div>
+      <form onSubmit={handleSubmit} className="p-4 space-y-3 max-h-[70vh] overflow-y-auto">
+        <div><label className="block text-sm font-medium text-gray-700 mb-1">规则名称</label><input type="text" value={formData.name} onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))} className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm" required /></div>
+        <div className="grid grid-cols-2 gap-3">
+          <div><label className="block text-sm font-medium text-gray-700 mb-1">分类</label><select value={formData.category} onChange={(e) => setFormData(prev => ({ ...prev, category: e.target.value }))} className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm"><option value="allow">允许类</option><option value="control">控制类</option><option value="change">变化类</option><option value="must">必须类</option></select></div>
+          <div><label className="block text-sm font-medium text-gray-700 mb-1">动作类型</label><select value={formData.actionType} onChange={(e) => setFormData(prev => ({ ...prev, actionType: e.target.value }))} className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm"><option value="max_override">允许超出</option><option value="max_limit">控制限制</option><option value="increase">增加</option><option value="decrease">降低</option><option value="must_reduce">必须降低</option><option value="must_reach">必须达到</option></select></div>
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">关键词</label>
+          <div className="flex gap-2 mb-2"><input type="text" value={keywordInput} onChange={(e) => setKeywordInput(e.target.value)} onKeyPress={(e) => e.key === 'Enter' && (e.preventDefault(), addKeyword())} placeholder="输入后按回车添加" className="flex-1 px-2 py-1.5 border border-gray-300 rounded text-sm" /><button type="button" onClick={addKeyword} className="px-3 py-1.5 bg-indigo-600 text-white rounded text-sm">添加</button></div>
+          <div className="flex flex-wrap gap-1">{formData.keywords.map((kw, i) => (<span key={i} className="inline-flex items-center gap-1 px-2 py-1 bg-indigo-100 text-indigo-700 text-xs rounded">{kw}<button type="button" onClick={() => removeKeyword(i)} className="hover:text-indigo-900">×</button></span>))}</div>
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">触发词</label>
+          <div className="flex gap-2 mb-2"><input type="text" value={triggerInput} onChange={(e) => setTriggerInput(e.target.value)} onKeyPress={(e) => e.key === 'Enter' && (e.preventDefault(), addTrigger())} placeholder="输入后按回车添加" className="flex-1 px-2 py-1.5 border border-gray-300 rounded text-sm" /><button type="button" onClick={addTrigger} className="px-3 py-1.5 bg-indigo-600 text-white rounded text-sm">添加</button></div>
+          <div className="flex flex-wrap gap-1">{formData.triggerWords.map((tw, i) => (<span key={i} className="inline-flex items-center gap-1 px-2 py-1 bg-purple-100 text-purple-700 text-xs rounded">{tw}<button type="button" onClick={() => removeTrigger(i)} className="hover:text-purple-900">×</button></span>))}</div>
+        </div>
+        <div className="flex items-center gap-2"><input type="checkbox" id="enabled" checked={formData.enabled} onChange={(e) => setFormData(prev => ({ ...prev, enabled: e.target.checked }))} className="w-4 h-4 text-indigo-600 rounded" /><label htmlFor="enabled" className="text-sm text-gray-700">启用此规则</label></div>
+        <div className="flex justify-end gap-3 pt-3 border-t"><button type="button" onClick={onClose} className="px-4 py-2 text-gray-700 bg-gray-100 rounded hover:bg-gray-200">取消</button><button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700">保存</button></div>
+      </form>
     </div>
   );
 };
 
-const UnitEditor = ({ unit, onSave, onClose }) => {
+const UnitEditor = ({ unit, onSave, onClose, position: initialPosition = { x: 100, y: 150 } }) => {
   const [formData, setFormData] = useState({
     name: unit?.name || '',
     id: unit?.id || '',
@@ -343,6 +450,47 @@ const UnitEditor = ({ unit, onSave, onClose }) => {
     enabled: unit?.enabled ?? true
   });
   const [keywordInput, setKeywordInput] = useState('');
+  const [position, setPosition] = useState(initialPosition);
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+  const containerRef = useRef(null);
+  const headerRef = useRef(null);
+
+  // 处理拖动开始
+  const handleDragStart = (e) => {
+    if (headerRef.current && headerRef.current.contains(e.target)) {
+      setIsDragging(true);
+      const rect = containerRef.current.getBoundingClientRect();
+      setDragOffset({
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top
+      });
+    }
+  };
+
+  // 处理拖动移动
+  const handleDragMove = (e) => {
+    if (!isDragging) return;
+    const newX = Math.max(0, Math.min(e.clientX - dragOffset.x, window.innerWidth - 500));
+    const newY = Math.max(80, Math.min(e.clientY - dragOffset.y, window.innerHeight - 400));
+    setPosition({ x: newX, y: newY });
+  };
+
+  // 处理拖动结束
+  const handleDragEnd = () => {
+    setIsDragging(false);
+  };
+
+  useEffect(() => {
+    if (isDragging) {
+      document.addEventListener('mousemove', handleDragMove);
+      document.addEventListener('mouseup', handleDragEnd);
+      return () => {
+        document.removeEventListener('mousemove', handleDragMove);
+        document.removeEventListener('mouseup', handleDragEnd);
+      };
+    }
+  }, [isDragging, dragOffset]);
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -352,28 +500,42 @@ const UnitEditor = ({ unit, onSave, onClose }) => {
   const removeKeyword = (i) => { setFormData(prev => ({ ...prev, keywords: prev.keywords.filter((_, idx) => idx !== i) })); };
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[100]">
-      <div className="bg-white rounded-lg shadow-xl w-full max-w-lg mx-4">
-        <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
+    <div
+      ref={containerRef}
+      onMouseDown={handleDragStart}
+      className="fixed bg-white rounded-lg shadow-2xl border z-[150] w-[500px] cursor-move"
+      style={{ left: `${position.x}px`, top: `${position.y}px`, cursor: isDragging ? 'grabbing' : 'default' }}
+    >
+      {/* 头部 - 拖动区域 */}
+      <div
+        ref={headerRef}
+        className="px-4 py-3 border-b border-gray-200 flex items-center justify-between bg-gradient-to-r from-indigo-50 to-purple-50 shrink-0 cursor-grab active:cursor-grabbing rounded-t-lg"
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-lg">{unit ? '✏️' : '➕'}</span>
           <h3 className="text-base font-semibold text-gray-900">{unit ? '编辑单位' : '添加单位'}</h3>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg></button>
         </div>
-        <form onSubmit={handleSubmit} className="p-4 space-y-3 max-h-[70vh] overflow-y-auto">
-          <div><label className="block text-sm font-medium text-gray-700 mb-1">单位 ID</label><input type="text" value={formData.id} onChange={(e) => setFormData(prev => ({ ...prev, id: e.target.value }))} className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm" placeholder="例如：ten_thousand" disabled={!!unit} required /></div>
-          <div><label className="block text-sm font-medium text-gray-700 mb-1">单位名称</label><input type="text" value={formData.name} onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))} className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm" placeholder="例如：万元" required /></div>
-          <div className="grid grid-cols-2 gap-3">
-            <div><label className="block text-sm font-medium text-gray-700 mb-1">类型</label><select value={formData.type} onChange={(e) => setFormData(prev => ({ ...prev, type: e.target.value }))} className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm"><option value="ratio">比率</option><option value="absolute">绝对额</option></select></div>
-            <div><label className="block text-sm font-medium text-gray-700 mb-1">转换倍率</label><input type="number" step="0.0001" value={formData.multiplier} onChange={(e) => setFormData(prev => ({ ...prev, multiplier: parseFloat(e.target.value) }))} className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm" placeholder="例如：1" required /></div>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">关键词</label>
-            <div className="flex gap-2 mb-2"><input type="text" value={keywordInput} onChange={(e) => setKeywordInput(e.target.value)} onKeyPress={(e) => e.key === 'Enter' && (e.preventDefault(), addKeyword())} placeholder="输入后按回车添加" className="flex-1 px-2 py-1.5 border border-gray-300 rounded text-sm" /><button type="button" onClick={addKeyword} className="px-3 py-1.5 bg-indigo-600 text-white rounded text-sm">添加</button></div>
-            <div className="flex flex-wrap gap-1">{formData.keywords.map((kw, i) => (<span key={i} className="inline-flex items-center gap-1 px-2 py-1 bg-indigo-100 text-indigo-700 text-xs rounded">{kw}<button type="button" onClick={() => removeKeyword(i)} className="hover:text-indigo-900">×</button></span>))}</div>
-          </div>
-          <div className="flex items-center gap-2"><input type="checkbox" id="unitEnabled" checked={formData.enabled} onChange={(e) => setFormData(prev => ({ ...prev, enabled: e.target.checked }))} className="w-4 h-4 text-indigo-600 rounded" /><label htmlFor="unitEnabled" className="text-sm text-gray-700">启用此单位</label></div>
-          <div className="flex justify-end gap-3 pt-3 border-t"><button type="button" onClick={onClose} className="px-4 py-2 text-gray-700 bg-gray-100 rounded hover:bg-gray-200">取消</button><button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700">保存</button></div>
-        </form>
+        <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
       </div>
+      <form onSubmit={handleSubmit} className="p-4 space-y-3 max-h-[70vh] overflow-y-auto">
+        <div><label className="block text-sm font-medium text-gray-700 mb-1">单位 ID</label><input type="text" value={formData.id} onChange={(e) => setFormData(prev => ({ ...prev, id: e.target.value }))} className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm" placeholder="例如：ten_thousand" disabled={!!unit} required /></div>
+        <div><label className="block text-sm font-medium text-gray-700 mb-1">单位名称</label><input type="text" value={formData.name} onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))} className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm" placeholder="例如：万元" required /></div>
+        <div className="grid grid-cols-2 gap-3">
+          <div><label className="block text-sm font-medium text-gray-700 mb-1">类型</label><select value={formData.type} onChange={(e) => setFormData(prev => ({ ...prev, type: e.target.value }))} className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm"><option value="ratio">比率</option><option value="absolute">绝对额</option></select></div>
+          <div><label className="block text-sm font-medium text-gray-700 mb-1">转换倍率</label><input type="number" step="0.0001" value={formData.multiplier} onChange={(e) => setFormData(prev => ({ ...prev, multiplier: parseFloat(e.target.value) }))} className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm" placeholder="例如：1" required /></div>
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">关键词</label>
+          <div className="flex gap-2 mb-2"><input type="text" value={keywordInput} onChange={(e) => setKeywordInput(e.target.value)} onKeyPress={(e) => e.key === 'Enter' && (e.preventDefault(), addKeyword())} placeholder="输入后按回车添加" className="flex-1 px-2 py-1.5 border border-gray-300 rounded text-sm" /><button type="button" onClick={addKeyword} className="px-3 py-1.5 bg-indigo-600 text-white rounded text-sm">添加</button></div>
+          <div className="flex flex-wrap gap-1">{formData.keywords.map((kw, i) => (<span key={i} className="inline-flex items-center gap-1 px-2 py-1 bg-indigo-100 text-indigo-700 text-xs rounded">{kw}<button type="button" onClick={() => removeKeyword(i)} className="hover:text-indigo-900">×</button></span>))}</div>
+        </div>
+        <div className="flex items-center gap-2"><input type="checkbox" id="unitEnabled" checked={formData.enabled} onChange={(e) => setFormData(prev => ({ ...prev, enabled: e.target.checked }))} className="w-4 h-4 text-indigo-600 rounded" /><label htmlFor="unitEnabled" className="text-sm text-gray-700">启用此单位</label></div>
+        <div className="flex justify-end gap-3 pt-3 border-t"><button type="button" onClick={onClose} className="px-4 py-2 text-gray-700 bg-gray-100 rounded hover:bg-gray-200">取消</button><button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700">保存</button></div>
+      </form>
     </div>
   );
 };

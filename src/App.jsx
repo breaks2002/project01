@@ -18,6 +18,7 @@ import NodeTreeList from './components/NodeTreeList/NodeTreeList';
 import KnowledgeBasePanel from './components/KnowledgeBase/KnowledgeBasePanel';
 import ScenarioSelector from './components/KnowledgeBase/ScenarioSelector';
 import ConstraintRulePanel from './components/DataPanel/ConstraintRulePanel';
+import FactorAliasPanel from './components/DataPanel/FactorAliasPanel';
 import { sampleSalesModel, sampleProfitModel } from './examples/sampleModel';
 import html2canvas from 'html2canvas';
 
@@ -51,6 +52,7 @@ function App() {
 
   const [showEditor, setShowEditor] = useState(false);
   const [showDataImport, setShowDataImport] = useState(false);
+  const [showResetAllConfirm, setShowResetAllConfirm] = useState(false);
   const [showFullscreenData, setShowFullscreenData] = useState(false);
   const [showFormulaEditor, setShowFormulaEditor] = useState(false);
   const [showDataPanelLocal, setShowDataPanelLocal] = useState(false);
@@ -83,7 +85,9 @@ function App() {
   const [showKnowledgeBase, setShowKnowledgeBase] = useState(false);
   const [showScenarioSelector, setShowScenarioSelector] = useState(false);
   const [showRulePanel, setShowRulePanel] = useState(false);
+  const [showAliasPanel, setShowAliasPanel] = useState(false);
   const [rulePanelZIndex, setRulePanelZIndex] = useState(59);
+  const [aliasPanelZIndex, setAliasPanelZIndex] = useState(60);
   const [knowledgeBaseZIndex, setKnowledgeBaseZIndex] = useState(57);
   const [scenarioSelectorZIndex, setScenarioSelectorZIndex] = useState(58);
   const [selectedScenarios, setSelectedScenarios] = useState([]); // 选中的场景
@@ -215,6 +219,11 @@ function App() {
     setRulePanelZIndex(maxZ);
   }, [getAllZIndexes]);
 
+  const bringAliasPanelToFront = useCallback(() => {
+    const maxZ = Math.max(...getAllZIndexes()) + 1;
+    setAliasPanelZIndex(maxZ);
+  }, [getAllZIndexes]);
+
   const handleSelectScenarios = useCallback((scenarios) => {
     setSelectedScenarios(scenarios);
     console.log('[App] 选中的场景:', scenarios);
@@ -301,15 +310,16 @@ function App() {
   }, [scale, setScale]);
 
   // 处理节点值变化（仅驱动因子）
-  const handleUpdateNode = useCallback((id, value) => {
+  const handleUpdateNode = useCallback((id, value, extraUpdates = {}) => {
     const node = nodes[id];
     if (!node || node.type !== 'driver') return;
 
+    const nodeId = id;
     // 确保 value 是两位小数 - 用整数法避免精度问题
     const roundedValue = Math.round(value * 100) / 100;
 
     // 如果有 originalTimeData，只调整预测数，不改变实际数
-    const updates = { value: roundedValue };
+    const updates = { value: roundedValue, ...extraUpdates };
 
     // 判断聚合方式：优先用节点显式指定的 aggregationType，否则根据 unit 判断
     let aggregationType = node.aggregationType;
@@ -516,6 +526,29 @@ function App() {
     setEditingNode(nodes[nodeId]);
     setShowEditor(true);
   }, [nodes]);
+
+  // 全部重置 - 仅重置数据
+  const handleResetAllDataOnly = useCallback(() => {
+    setShowResetAllConfirm(false);
+    resetAllDrivers();
+  }, [resetAllDrivers]);
+
+  // 全部重置 - 数据和描述同步重置
+  const handleResetAllDataAndDescription = useCallback(() => {
+    setShowResetAllConfirm(false);
+    // 重置所有驱动因子的值和描述
+    Object.values(nodes).forEach(node => {
+      if (node.type === 'driver') {
+        if (node.initialBaseline !== null && node.initialBaseline !== undefined && !isNaN(node.initialBaseline)) {
+          updateNode(node.id, {
+            value: node.initialBaseline,
+            adjustmentDescription: ''
+          });
+        }
+      }
+    });
+    resetAllDrivers(); // 调用原有的重置逻辑
+  }, [nodes, updateNode, resetAllDrivers]);
 
   // 辅助函数：转义正则表达式特殊字符
   const escapeRegExp = (string) => {
@@ -921,6 +954,9 @@ function App() {
         onOpenRulePanel={() => {
           setShowRulePanel(true);
         }}
+        onOpenAliasPanel={() => {
+          setShowAliasPanel(true);
+        }}
         showRulePanel={showRulePanel}
       />
 
@@ -952,12 +988,11 @@ function App() {
           </button>
           <span className="text-xs text-gray-400 ml-3">提示: Ctrl + 滚轮也可以缩放</span>
         </div>
+        {/* 统计信息 */}        <div className="flex items-center gap-4 text-xs">          {(() => {            const allNodes = Object.values(nodes);            const total = allNodes.length;            const computed = allNodes.filter(n => n.type === 'computed').length;            const drivers = allNodes.filter(n => n.type === 'driver').length;            const changedComputed = allNodes.filter(n => n.type === 'computed' && n.value !== n.initialBaseline && n.initialBaseline !== null && n.initialBaseline !== undefined).length;            const changedDrivers = allNodes.filter(n => n.type === 'driver' && n.value !== n.initialBaseline && n.initialBaseline !== null && n.initialBaseline !== undefined).length;            const describedDrivers = allNodes.filter(n => n.type === 'driver' && n.adjustmentDescription && n.adjustmentDescription.trim() !== '').length;            return (              <>                <span className="text-gray-500">                  节点总数：<span className="font-medium text-gray-700">{total}</span>                </span>                <span className="text-gray-500">                  计算指标：<span className="font-medium text-blue-600">{computed}</span>                </span>                <span className="text-gray-500">                  驱动因子：<span className="font-medium text-green-600">{drivers}</span>                </span>                <span className="text-gray-500">                  已变更计算指标：<span className="font-medium text-orange-600">{changedComputed}</span>                </span>                <span className="text-gray-500">                  已变更驱动因子：<span className="font-medium text-orange-600">{changedDrivers}</span>                </span>                <span className="text-gray-500">                  已描述驱动因子：<span className="font-medium text-purple-600">{describedDrivers}</span>                </span>              </>            );          })()}        </div>
         <div className="flex items-center gap-2">
           <button
             onClick={() => {
-              if (window.confirm('确定要将所有驱动因子重置到初始值吗？')) {
-                resetAllDrivers();
-              }
+              setShowResetAllConfirm(true);
             }}
             className="px-3 py-1 bg-orange-500 hover:bg-orange-600 text-white rounded text-sm"
           >
@@ -1252,6 +1287,55 @@ function App() {
             onClose={() => setShowRulePanel(false)}
             position={{ x: 200, y: 150 }}
           />
+        </div>
+      )}
+
+      {/* 别名管理面板 - 可拖动窗口 */}
+      {showAliasPanel && (
+        <div
+          style={{ zIndex: aliasPanelZIndex }}
+          className="fixed"
+          onClick={bringAliasPanelToFront}
+        >
+          <FactorAliasPanel
+            onClose={() => setShowAliasPanel(false)}
+            position={{ x: 250, y: 200 }}
+          />
+        </div>
+      )}
+
+      {/* 全部重置确认对话框 */}
+      {showResetAllConfirm && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[9999]">
+          <div className="bg-white rounded-lg p-4 max-w-md mx-4 shadow-xl">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="text-lg">🔄</span>
+              <span className="font-medium text-gray-800">全部重置确认</span>
+            </div>
+            <div className="text-sm text-gray-600 mb-4">
+              检测到当前存在调整描述，请选择重置方式：
+            </div>
+            <div className="space-y-2">
+              <button
+                onClick={handleResetAllDataOnly}
+                className="w-full px-3 py-2 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 text-sm font-medium"
+              >
+                📊 仅重置数据（保留描述）
+              </button>
+              <button
+                onClick={handleResetAllDataAndDescription}
+                className="w-full px-3 py-2 bg-red-100 text-red-700 rounded hover:bg-red-200 text-sm font-medium"
+              >
+                🗑️ 数据和描述同步重置
+              </button>
+              <button
+                onClick={() => setShowResetAllConfirm(false)}
+                className="w-full px-3 py-2 bg-gray-100 text-gray-600 rounded hover:bg-gray-200 text-sm"
+              >
+                取消
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

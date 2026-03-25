@@ -1,0 +1,22 @@
+指标 ID，指标名称，属性，2026Q1,2026Q2,2026Q3,2026Q4
+yingyeshouru，营业收入，AC,4250000,4660000,,
+yingyeshouru，营业收入，FC,,,5220000,5650000
+yingyeshouru，营业收入，BU,4500000,5000000,5400000,5900000
+yingyechengben，营业成本，AC,2650000,2890000,,
+yingyechengben，营业成本，FC,,,3260000,3540000
+yingyechengben，营业成本，BU,2800000,3100000,3400000,3700000
+shuijinjifujia，税金及附加，AC,42500,46600,,
+shuijinjifujia，税金及附加，FC,,,52200,56500
+shuijinjifujia，税金及附加，BU,45000,50000,54000,59000
+xiaoshoufeiyong，销售费用，AC,600000,650000,,
+xiaoshoufeiyong，销售费用，FC,,,750000,820000
+xiaoshoufeiyong，销售费用，BU,630000,700000,760000,830000
+guanlifeiyong，管理费用，AC,390000,405000,,
+guanlifeiyong，管理费用，FC,,,450000,480000
+guanlifeiyong，管理费用，BU,410000,430000,460000,490000
+yanfafeiyong，研发费用，AC,260000,275000,,
+yanfafeiyong，研发费用，FC,,,310000,340000
+yanfafeiyong，研发费用，BU,280000,300000,330000,360000
+caiwufeiyong，财务费用，AC,85000,92000,,
+caiwufeiyong，财务费用，FC,,,105000,115000
+caiwufeiyong，财务费用，BU,90000,100000,110000,120000

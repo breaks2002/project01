@@ -1,0 +1,22 @@
+指标 ID，指标名称，属性，2024,2025,2026
+yingyeshouru，营业收入，AC,45000000,48000000,
+yingyeshouru，营业收入，FC,,,52000000
+yingyeshouru，营业收入，BU,42000000,50000000,55000000
+yingyechengben，营业成本，AC,28000000,30000000,
+yingyechengben，营业成本，FC,,,32000000
+yingyechengben，营业成本，BU,26000000,31000000,34000000
+shuijinjifujia，税金及附加，AC,450000,480000,
+shuijinjifujia，税金及附加，FC,,,520000
+shuijinjifujia，税金及附加，BU,420000,500000,550000
+xiaoshoufeiyong，销售费用，AC,3200000,3500000,
+xiaoshoufeiyong，销售费用，FC,,,3800000
+xiaoshoufeiyong，销售费用，BU,3000000,3600000,4000000
+guanlifeiyong，管理费用，AC,2100000,2200000,
+guanlifeiyong，管理费用，FC,,,2400000
+guanlifeiyong，管理费用，BU,2000000,2300000,2500000
+yanfafeiyong，研发费用，AC,1500000,1600000,
+yanfafeiyong，研发费用，FC,,,1800000
+yanfafeiyong，研发费用，BU,1400000,1700000,1900000
+caiwufeiyong，财务费用，AC,320000,350000,
+caiwufeiyong，财务费用，FC,,,380000
+caiwufeiyong，财务费用，BU,300000,360000,400000

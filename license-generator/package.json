@@ -1,0 +1,13 @@
+{
+  "name": "aidm-license-generator",
+  "version": "1.0.0",
+  "description": "AIDM License Generator Tool",
+  "main": "license-gen.js",
+  "scripts": {
+    "start": "node license-gen.js",
+    "generate-keys": "node license-gen.js --generate-keys"
+  },
+  "bin": {
+    "license-gen": "./license-gen.js"
+  }
+}

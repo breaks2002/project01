@@ -1,0 +1,7 @@
+{
+  "name": "ValQ Connector",
+  "description": "连接 ValQ AIDM 系统",
+  "path": "pbi-proxy.exe",
+  "arguments": "%server% %database%",
+  "iconData": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAB0SURBVFhH7c0xDoAgEEXRYePeXAB7cwFsDRQWJhMn0fj/pHgF5AOllHK/2U5a7EiGZEiGZEiGZEiGZEiGZEiGZEiGZPwO8T6hd/wPn+j4PuHbWb/j+4Rv7/gdIxmSIRmSIRmSIRmSIRmSIRmSIRmS8b0Y4wRBWBvBIr8G2AAAAABJRU5ErkJggg=="
+}

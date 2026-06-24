@@ -1,0 +1,12 @@
+{
+  "name": "aidm-license-manager",
+  "version": "1.0.0",
+  "description": "AIDM License Manager - Local License Management Tool",
+  "main": "license-mgr.js",
+  "scripts": {
+    "start": "node license-mgr.js"
+  },
+  "bin": {
+    "license-mgr": "./license-mgr.js"
+  }
+}

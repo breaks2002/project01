@@ -1,0 +1,80 @@
+{
+  "name": "aidm",
+  "productName": "AIDM",
+  "description": "AIDM Value Driver Tree Analysis Tool",
+  "author": "AIDM Team",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "eslint .",
+    "preview": "vite preview",
+    "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:3000 && electron .\"",
+    "electron:build": "vite build && node -e \"if(!require('fs').existsSync('pbi-proxy/pbi-proxy.exe')){console.error('❌ pbi-proxy/pbi-proxy.exe 不存在，无法打包');process.exit(1);}\" && electron-builder",
+    "electron:start": "electron ."
+  },
+  "dependencies": {
+    "d3": "^7.9.0",
+    "html2canvas": "^1.4.1",
+    "lucide-react": "^1.16.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "recharts": "^3.7.0",
+    "xlsx": "^0.18.5",
+    "zustand": "^4.5.2"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^9.2.1",
+    "electron": "^42.2.0",
+    "electron-builder": "^26.8.1",
+    "eslint": "^9.9.0",
+    "eslint-plugin-react": "^7.35.0",
+    "eslint-plugin-react-hooks": "^5.1.0-rc.0",
+    "eslint-plugin-react-refresh": "^0.4.9",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "vite": "^5.4.1",
+    "wait-on": "^9.0.10"
+  },
+  "build": {
+    "appId": "com.aidm.app",
+    "productName": "AIDM",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**",
+      "electron/**",
+      "pbi-proxy/**"
+    ],
+    "extraResources": [
+      {
+        "from": "docs/AIDM用户操作手册.pdf",
+        "to": "docs/AIDM用户操作手册.pdf"
+      },
+      {
+        "from": "docs/AI 决策模块操作说明书.pdf",
+        "to": "docs/AI 决策模块操作说明书.pdf"
+      }
+    ],
+    "afterPack": "scripts/set-version-info.cjs",
+    "win": {
+      "target": "nsis",
+      "forceCodeSigning": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "AIDM"
+    }
+  }
+}

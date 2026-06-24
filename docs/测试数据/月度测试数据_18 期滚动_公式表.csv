@@ -1,0 +1,8 @@
+指标 ID,指标名称,节点类型,公式,最小值,最大值,单位,显示格式,指标方向,层级,汇总方式,比率型指标
+jinglirun,净利润,computed,yingyelirun * 0.75,,,元,"#,##0",auto,1,sum,FALSE
+yingyelirun,营业利润,computed,maolirun - guanlifeiyong - xiaoshoufeiyong,,,元,"#,##0",auto,2,sum,FALSE
+maolirun,毛利润,computed,yingyeshouru - yingyechengben,,,元,"#,##0",auto,3,sum,FALSE
+guanlifeiyong,管理费用,driver,,1063000,2700000,元,"#,##0",negative,3,sum,FALSE
+xiaoshoufeiyong,销售费用,driver,,1705000,4600000,元,"#,##0",negative,3,sum,FALSE
+yingyeshouru,营业收入,driver,,12510000,32000000,元,"#,##0",auto,4,sum,FALSE
+yingyechengben,营业成本,driver,,7760000,20000000,元,"#,##0",negative,4,sum,FALSE

@@ -1,0 +1,20 @@
+指标 ID,指标名称,节点类型,公式,最小值,最大值,单位,显示格式,指标方向,层级,汇总方式,比率型指标
+fangwenliuliang,访问流量,driver,,40000,100000,人次,"#,##0",auto,1,sum,0
+xiansuoshu,线索数,driver,,7000,20000,个,"#,##0",auto,2,sum,0
+shangjishu,商机数,driver,,2000,6000,个,"#,##0",auto,3,sum,0
+chengjiaojine,成交额,driver,,1000000,3000000,元,"#,##0",auto,4,sum,0
+zhuanhualv_xiansuo,线索转化率,computed,xiansuoshu/fangwenliuliang,0.15,0.22,%,0.00%,auto,2,sum,0
+zhuanhualv_shangji,商机转化率,computed,shangjishu/xiansuoshu,0.25,0.35,%,0.00%,auto,2,sum,0
+chengjiaolv,成交率,computed,chengjiaojine/shangjishu/1000,400,600,%,"#,##0",auto,2,sum,0
+zongchengjiaoe,全年总成交额,computed,MONTHLY_SUM(chengjiaojine),20000000,30000000,元,"#,##0",auto,2,sum,0
+shiji_zonge,实际总成交额,computed,MONTHLY_SUM(chengjiaojine),15000000,25000000,元,"#,##0",auto,2,sum,0
+yuce_zonge,预测总成交额,computed,MONTHLY_SUM(chengjiaojine),10000000,15000000,元,"#,##0",auto,2,sum,0
+mubiao_zonge,目标总成交额,computed,MONTHLY_SUM(chengjiaojine),25000000,35000000,元,"#,##0",auto,2,sum,0
+wanchenglv,目标完成率,computed,MONTHLY_SUM(chengjiaojine)/MONTHLY_SUM(chengjiaojine),0.7,1.2,%,0.00%,auto,2,average,1
+shiji_wanchenglv,实际完成率,computed,MONTHLY_SUM(chengjiaojine)/MONTHLY_SUM(chengjiaojine),0.5,1.0,%,0.00%,auto,2,average,1
+kejunjia,平均客单价,computed,MONTHLY_SUM(chengjiaojine)/MONTHLY_SUM(shangjishu),400,600,元,"#,##0",auto,2,average,0
+pingjun_zhou_eflow,平均周访问量,computed,MONTHLY_AVG(fangwenliuliang),50000,80000,人次,"#,##0",auto,2,average,0
+zuigao_zhou_eflow,最高周访问量,computed,MONTHLY_MAX(fangwenliuliang),60000,95000,人次,"#,##0",auto,2,max,0
+zuidi_zhou_eflow,最低周访问量,computed,MONTHLY_MIN(fangwenliuliang),40000,60000,人次,"#,##0",auto,2,min,0
+you_shuju_zhoushu,有数据周数,computed,MONTHLY_COUNT(fangwenliuliang),10,20,周,"#,##0",auto,2,count,0
+feiling_zhoushu,非零周数,computed,MONTHLY_COUNT_NONZERO(chengjiaojine),10,20,周,"#,##0",auto,2,count,0

@@ -1,0 +1,18 @@
+AIDM Software License Agreement
+
+Copyright (c) 2026 AIDM
+
+This software is licensed, not sold. The license grants you the right to use the software under specific terms and conditions.
+
+LICENSE TYPES:
+- TRIAL: 30 days evaluation period
+- STANDARD: 1 year license
+- PRO: 10 years license
+
+TERMS AND CONDITIONS:
+1. The license is bound to a specific machine (machine code verification)
+2. The license cannot be transferred to another machine
+3. The license expires according to the specified duration
+4. Unauthorized modification or reverse engineering is prohibited
+
+For more information, please contact the developer.
